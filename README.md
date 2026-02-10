@@ -16,7 +16,7 @@ API design.
 `ArrayBuffer.prototype.transfer()` (ES2024) introduced ownership transfer to
 JavaScript: moving exclusive access from one holder to another, rendering the
 original unusable. But the concept is hardcoded to `ArrayBuffer`. This proposal
-generalizes it with four pieces:
+generalizes it:
 
 1. **`Symbol.transfer`** -- a well-known symbol for opting into transfer.
 2. **`Object.transfer(obj)`** -- triggers transfer, returns new owner,
@@ -25,14 +25,12 @@ generalizes it with four pieces:
    traps.
 4. **Proxy `transfer` handler trap** -- intercepts transfer on Proxy objects.
 
-These follow `Symbol.iterator` and `Symbol.dispose` as a language protocol,
-with full Proxy interceptability.
+These follow `Symbol.iterator` and `Symbol.dispose` as a language protocol.
 
 ### An Existing Pattern Without a Common Protocol
 
-Ownership transfer is not a new concept in the platform. Multiple APIs
-already implement it independently, each with its own method name and
-mechanism:
+Multiple APIs already implement ownership transfer independently, each with
+its own method name and mechanism:
 
 - **`ArrayBuffer.prototype.transfer()`** -- moves buffer data, detaches
   the original (ES2024).
@@ -48,15 +46,13 @@ mechanism:
   transfer list with its own types (`X509Certificate`, `FileHandle`,
   `KeyObject`, etc.) that are not covered by the web API or language spec.
 
-Each of these solves the same problem — exclusive ownership of a stateful
-resource — but they share no common protocol. There is no way to write
-generic code that transfers an arbitrary resource, and no way for
-user-defined types to participate. Proxy can intercept the underlying method
-calls via existing traps (`get`, `apply`), but cannot distinguish a
-transfer operation from an ordinary property access without inspecting the
-property key — a dedicated trap makes the intent explicit and easier for
-engines to optimize. This proposal formalizes what these APIs already do
-into a language-level protocol that any object can implement.
+These all enforce exclusive ownership of a stateful resource, but share no
+common protocol. There is no way to write generic code that transfers an
+arbitrary resource, and no way for user-defined types to participate. Proxy
+can intercept the underlying method calls via existing traps (`get`,
+`apply`), but cannot distinguish a transfer operation from an ordinary
+property access without inspecting the property key — a dedicated trap
+makes the intent explicit and easier for engines to optimize.
 
 ### The Problem with Iterators
 
@@ -83,6 +79,22 @@ async function processStream(stream) {
   pipeline2(iter);  // races with pipeline1 -- data is split unpredictably
 }
 ```
+
+``ReadableStream.from(iter)` wraps an async
+iterator in a `ReadableStream` that has locking — but the locking protects
+the *stream*, not the *iterator*. Any code that retains a reference to
+`iter` can call `.next()` and pull values out from under the stream:
+
+```js
+const iter = generateData();
+const stream = ReadableStream.from(iter);
+const reader = stream.getReader(); // stream is locked
+
+await iter.next(); // bypasses the stream -- silently steals data
+```
+
+The stream has no way to prevent this because iterators have no ownership
+primitive.
 
 ### Not All Iterables Are Transferable
 
@@ -112,12 +124,12 @@ implement it explicitly.
 ### Why a Protocol?
 
 Adding `.transfer()` directly to `Iterator.prototype` risks collision with
-existing user-land code. And as shown above, transfer is not unique to
-iterators — built-in APIs already implement it under different method names
-(`.transfer()`, `.move()`, `getReader()`), and user-land types (database
-cursors, file handles, resource wrappers) need it too. A Symbol-based
-protocol unifies all of these under a single mechanism. And since every
-other MOP operation is interceptable via Proxy, transfer should be too.
+existing user-land code. And transfer is not unique to iterators — built-in
+APIs already implement it under different method names (`.transfer()`,
+`.move()`, `getReader()`), and user-land types (database cursors, file
+handles, resource wrappers) need it too. A Symbol-based protocol avoids
+the collision while covering all of these. Every other MOP operation is
+interceptable via Proxy; transfer should be too.
 
 ## Proposal
 
@@ -133,28 +145,24 @@ A new well-known symbol. An object implements the protocol by providing a
 
 The design follows `Symbol.dispose` / `Symbol.asyncDispose`: the spec
 defines that the method exists, when it is called, and minimal constraints
-on its return value (must be an object). Beyond that, the spec does not
-enforce what the method *does*. Nothing requires that `[Symbol.dispose]()`
-actually releases resources. Nothing requires that `[Symbol.transfer]()`
-actually detaches the source or moves state. The implementation semantics
-are specific to each object. Detaching the source, throwing on post-transfer
-access, making disposal a no-op on detached objects — these are contracts
-that implementations are expected to follow but the engine cannot verify.
+on its return value (must be an object). Nothing requires that
+`[Symbol.transfer]()` actually detaches the source or moves state, just as
+nothing requires that `[Symbol.dispose]()` actually releases resources.
+Detaching the source, throwing on post-transfer access, making disposal a
+no-op on detached objects — these are contracts that implementations are
+expected to follow but the engine cannot verify.
 
 #### Transfer Does Not Ensure Exclusive Access
 
 Transfer is a primitive for *moving* state, not a mechanism that *enforces*
 exclusive ownership. `Object.transfer(obj)` detaches the source and returns
 a new owner, but nothing prevents the caller from passing that new owner to
-multiple consumers. This is the same as `ArrayBuffer.prototype.transfer()`:
-the resulting buffer is a fresh object, but the language does not prevent
-sharing it.
+multiple consumers. `ArrayBuffer.prototype.transfer()` has the same property: the resulting
+buffer is a fresh object, but the language does not prevent sharing it.
 
-Exclusive access is a property of how code is structured around transfer,
-not something the protocol itself guarantees. Transfer makes it *easier* to
-implement single-ownership patterns — the source is rendered unusable, so one
-reference is eliminated — but the discipline of not sharing the result is the
-caller's responsibility.
+Transfer makes it *easier* to implement single-ownership patterns — the
+source is rendered unusable, so one reference is eliminated — but the
+discipline of not sharing the result is the caller's responsibility.
 
 #### Custom Implementations Must Enforce Their Own Detach Semantics
 
@@ -283,7 +291,7 @@ and wants to avoid the overhead.
 
 ### `Reflect.transfer(target)`
 
-The `Reflect` counterpart, completing the standard triad:
+The `Reflect` counterpart:
 
 | Operation   | `Object` method        | `Reflect` method          | Proxy trap    |
 |-------------|------------------------|---------------------------|---------------|
@@ -629,8 +637,7 @@ predate this proposal and are unaffected. After transfer via
 ### Transfer Is Not Copy, and Not Cleanup
 
 Transfer **moves** state, it does not copy. The new iterator picks up where
-the original left off; the original is permanently detached. Same as
-`ArrayBuffer.prototype.transfer()`.
+the original left off; the original is permanently detached.
 
 Transfer does **not** call `.return()` or `[Symbol.dispose]()` on the
 original. The new owner assumes responsibility for cleanup.
@@ -714,10 +721,7 @@ for (const x of iter) {
 }
 ```
 
-The same happens with any other operation that invalidates an iterator
-mid-loop (e.g., detaching an `ArrayBuffer` backing a `TypedArray` while
-iterating it). The transfer itself succeeds; the loop fails on the next
-iteration step.
+The transfer itself succeeds; the loop fails on the next iteration step.
 
 #### `Symbol.transfer` on `Object.prototype`
 
@@ -754,10 +758,9 @@ internal state, leaving the object in an inconsistent state:
 ```
 
 The `[[Transfer]]` algorithm uses `? Call()`, so the exception propagates
-to the caller. The protocol does not attempt to roll back partial state
-changes -- this is the same situation as a `[Symbol.dispose]()` that throws
-mid-cleanup. Implementations should structure `[Symbol.transfer]()` to
-perform all fallible operations before mutating state when possible.
+to the caller. The protocol does not attempt to roll back partial state changes.
+Implementations should structure `[Symbol.transfer]()` to perform all
+fallible operations before mutating state when possible.
 
 #### Transfer of an Actively Executing Async Iterator
 
@@ -782,8 +785,8 @@ This is an implementation decision. Two options:
     This follows `ReadableStreamDefaultReader.releaseLock()` semantics but
     adds complexity.
 
-Option 1 is recommended. Transfer should fail fast rather than introduce
-implicit cancellation semantics.
+Option 1 is recommended. Requiring the caller to `await` before transferring
+is simpler than introducing implicit cancellation semantics.
 
 #### Re-entrancy
 
@@ -801,10 +804,8 @@ const obj = {
 
 The behavior is not explicitly constrained. The inner `Object.transfer()`
 call will invoke `GetMethod`, which triggers the getter again, leading to
-infinite recursion and a stack overflow. For built-in types, the engine
-controls the implementation and re-entrancy is not possible. For
-user-defined types, this is the implementor's problem -- same as a
-re-entrant `[Symbol.iterator]()` getter.
+infinite recursion and a stack overflow. For built-in types, re-entrancy is
+not possible. For user-defined types, this is the implementor's problem.
 
 #### Frozen and Sealed Objects
 
@@ -850,18 +851,17 @@ reference to `iter` or an intermediate iterator, they can consume values
 from underneath the transferred chain. Transfer detaches the object you
 call it on, not the objects it references.
 
-This is a consequence of transfer operating on a single object, not a
-graph. It matches how `ArrayBuffer.prototype.transfer()` works -- if a
-`TypedArray` references the buffer, transferring the buffer doesn't
-detach the `TypedArray` (though accessing it will throw because the
-underlying data is gone).
+Transfer operates on a single object, not a graph.
+`ArrayBuffer.prototype.transfer()` works the same way -- transferring a
+buffer doesn't detach a `TypedArray` that references it (though accessing
+the view will throw because the underlying data is gone).
 
 ## Use Cases
 
 ### Use Case 1: Concurrent Safety
 
 When async iterators are passed between functions, nothing enforces
-single-consumer access. Transfer makes ownership explicit:
+single-consumer access:
 
 ```js
 async function processStream(source) {
@@ -875,8 +875,7 @@ async function processStream(source) {
 
 ### Use Case 2: Ownership in APIs
 
-APIs that accept stateful objects often implicitly expect ownership. Transfer
-makes this enforceable:
+APIs that accept stateful objects often implicitly expect ownership:
 
 ```js
 class DataProcessor {
@@ -914,7 +913,55 @@ Without transfer, it is ambiguous who is responsible for calling `.return()`.
 
 [erm]: https://github.com/tc39/proposal-explicit-resource-management
 
-### Use Case 4: User-Defined Transferable Resources
+### Use Case 4: `ReadableStream.from()` and Unprotected Iterators
+
+`ReadableStream.from(iter)` wraps an async iterator in a `ReadableStream`.
+The stream has locking — `getReader()` ensures single-consumer access to
+the stream. But the underlying iterator has no such protection:
+
+```js
+async function* generateData() {
+  yield 'chunk1';
+  yield 'chunk2';
+  yield 'chunk3';
+}
+
+const iter = generateData();
+const stream = ReadableStream.from(iter);
+
+// The stream can be locked to a single reader...
+const reader = stream.getReader();
+
+// ...but nothing prevents consuming the iterator directly,
+// bypassing the stream entirely and corrupting both consumers:
+await iter.next(); // silently steals 'chunk1' from the stream
+```
+
+The stream's locking mechanism protects the *stream*, not the *iterator
+underneath it*. Any code that retains a reference to `iter` can call
+`.next()` and pull values out from under the stream, causing data loss or
+interleaving. The stream has no way to know this happened.
+
+With transfer, `ReadableStream.from()` could take ownership of the
+iterator, preventing this class of bug:
+
+```js
+const iter = generateData();
+const stream = ReadableStream.from(Object.transfer(iter));
+// iter is now detached -- any direct .next() call throws TypeError
+
+await iter.next(); // throws TypeError: Iterator has been detached
+
+// The stream is the sole consumer of the iterator's data
+const reader = stream.getReader();
+const { value } = await reader.read(); // 'chunk1' -- guaranteed
+```
+
+The same pattern applies to any API that wraps an iterator for internal
+consumption. Without transfer, the API must trust that callers discard
+their reference to the iterator. With transfer, the API can enforce it.
+
+### Use Case 5: User-Defined Transferable Resources
 
 **Implementors enforce detach semantics** -- the engine does not (see above).
 
@@ -986,10 +1033,9 @@ b.use();  // [1, 2, 3] -- both hold a reference to the same data.
 ```
 
 The engine validates mechanics (callable, returns object) but not semantics
-(original rendered unusable). Linting tools are the enforcement mechanism
-for user-defined implementations.
+(original rendered unusable).
 
-### Use Case 5: Proxy Membranes and Security Boundaries
+### Use Case 6: Proxy Membranes and Security Boundaries
 
 Without a `transfer` trap, transfer bypasses Proxy membranes:
 
@@ -1121,6 +1167,19 @@ iter.next(); // TypeError
   the source in a valid but unspecified state.
 - **`Symbol.iterator` / `Symbol.dispose`** -- precedent for Symbol-based
   protocols in the language for iteration and resource management.
+- **Piscina `Transferable` interface** -- the [Piscina][piscina] worker pool
+  defines a symbol-based transfer protocol: objects implement
+  `[Piscina.transferableSymbol]` (returns the transfer list) and
+  `[Piscina.valueSymbol]` (returns the value to transmit) to opt into
+  `postMessage` transfer. This is a userland precursor to `Symbol.transfer`,
+  limited to cross-thread transfer.
+- **Comlink `transfer()` / `releaseProxy()`** -- [Comlink][comlink] wraps
+  `postMessage` transfer with `Comlink.transfer(value, transferables)` and
+  provides `proxy[Comlink.releaseProxy]()` which sets a flag and throws on
+  subsequent access — a manual same-realm invalidation pattern.
+
+[piscina]: https://github.com/piscinajs/piscina
+[comlink]: https://github.com/GoogleChromeLabs/comlink
 
 ## Appendix: Web Platform Integration
 
@@ -1140,8 +1199,8 @@ The web platform has [`Transferable`][transferable] objects via `postMessage()`
 | **Objects supported**   | Hardcoded list in the spec              | Any object implementing the protocol     |
 | **User-extensible**     | No                                      | Yes                                      |
 
-`postMessage()` physically moves data across realms; `Object.transfer()`
-moves logical ownership within the same realm. Both detach the source.
+`postMessage()` moves data across realms; `Object.transfer()` moves
+ownership within the same realm. Both detach the source.
 
 A possible WHATWG/W3C follow-on: let the structured clone algorithm recognize
 `Symbol.transfer` for user-defined objects in `postMessage()` transfer lists:
@@ -1256,8 +1315,8 @@ Object.transfer(obj)                  worker.postMessage(msg, { transfer: [obj] 
   └─ Returns new owner (same realm)     └─ Reconstructs in target realm
 ```
 
-Both always detach the source. The difference is whether the new owner lives
-in the same realm or a different one.
+Both detach the source. The difference is whether the new owner lives in
+the same realm or a different one.
 
 ## Open Questions
 
@@ -1289,14 +1348,11 @@ in the same realm or a different one.
 ### "Too much machinery for the problem"
 
 The proposal adds five new language surface areas: a well-known symbol, an
-internal method, two static methods, and a Proxy trap. A reasonable
-objection is that the cost is disproportionate to the problem. The iterator
+internal method, two static methods, and a Proxy trap. The iterator
 interleaving bug from the motivation is real but may be uncommon in
-practice. The counter-argument is that the MOP integration (Proxy trap,
-`Reflect` method) is what distinguishes this from a userland convention —
-without it, `Object.transfer()` is just a utility function calling a
-symbol. Whether that distinction justifies the spec complexity is a
-judgment call.
+practice. The MOP integration (Proxy trap, `Reflect` method) is what
+distinguishes this from a userland convention — without it,
+`Object.transfer()` is just a utility function calling a symbol.
 
 ### "Why not userland?"
 
@@ -1323,9 +1379,8 @@ much easier to accept, but loses the membrane use case.
 `[[Get]]`, `[[Set]]`, `[[Delete]]` are operations the entire language
 depends on. `[[Transfer]]` is used by most objects never. Adding it to the
 essential internal methods table elevates it to the same status as property
-access. Counter: `[[Call]]` and `[[Construct]]` are essential internal
-methods that most objects don't have either, and they've been there since
-ES2015.
+access. `[[Call]]` and `[[Construct]]` are essential internal methods that most
+objects don't have either.
 
 ### "The frozen/sealed check is inconsistent with ArrayBuffer"
 
@@ -1357,27 +1412,24 @@ frozen buffers — but this is a breaking change to ES2024 behavior.
 Transfer eliminates one reference (the source) but doesn't prevent the
 caller from passing the result to multiple consumers. The "concurrent
 safety" use case requires every API that consumes an iterator to adopt the
-`Object.transfer()` pattern. Most won't, so the ecosystem
-benefit is incremental. A committee member could argue this is a convention
-problem, not a language problem.
+`Object.transfer()` pattern. Most won't, so the ecosystem benefit is
+incremental.
 
 ### "What about `Symbol.clone` / structured clone?"
 
-Someone will ask why this doesn't also define a `Symbol.clone` for
-non-destructive copying. Clone and transfer are different operations, but
-the question will come up. The WHATWG folks will want a concrete
-`structuredClone` integration story — saying "out of scope" may not
-satisfy them if they see this as the path to user-extensible structured
-clone.
+Clone and transfer are different operations, but the question will come up.
+WHATWG may want a concrete `structuredClone` integration story — saying
+"out of scope" may not satisfy if they see this as the path to
+user-extensible structured clone.
 
 ### "The `Object.prototype` exotic rejection depends on proposal-thenable-curtailment"
 
 That proposal is Stage 1 with an unsettled mechanism. Depending on it ties
 this proposal's outcome to another proposal's progress. If thenable
 curtailment stalls or changes approach, this proposal needs a different
-answer to prototype pollution. More broadly, making `Object.prototype`
-increasingly exotic is a slippery slope — every new well-known symbol
-with pollution concerns could justify another exotic rejection.
+answer to prototype pollution. Making `Object.prototype` increasingly
+exotic also sets a precedent — every new well-known symbol with pollution
+concerns could justify another exotic rejection.
 
 ### "The `using` interaction is a footgun"
 
@@ -1387,24 +1439,22 @@ const owned = Object.transfer(iter);
 doWork(owned); // if this throws, owned is not disposed -- resource leak
 ```
 
-The "correct" pattern requires two `using` bindings for one logical
-resource:
+The safe pattern requires two `using` bindings for one logical resource:
 
 ```js
 await using iter = source[Symbol.asyncIterator]();
 await using owned = Object.transfer(iter);
 ```
 
-Someone will argue this is confusing and error-prone compared to not
-transferring at all.
+This is arguably confusing and error-prone compared to not transferring
+at all.
 
 ### "Generator transfer is non-trivial engine work"
 
 Generator objects have complex internal state (`[[GeneratorState]]`,
 `[[GeneratorContext]]` including the suspended execution context and stack
 frame). Moving this to a new object is implementable but non-trivial.
-Async generators are harder — there's a job queue involved. Engine
-implementers may push back on the complexity.
+Async generators are harder — there's a job queue involved.
 
 ### "This overlaps with the Structs / shared structs proposal"
 
@@ -1418,9 +1468,9 @@ relationship.
 `ReadableStream` already has locking, single-consumer semantics, and is
 transferable via `postMessage()`. If the primary motivation is safe
 single-consumer iteration, wrapping an iterator in a `ReadableStream`
-solves it today. Counter: `ReadableStream` is a web API not available in
-all JS environments, and it's heavy for simple iteration. But the
-objection will be raised.
+solves it today. `ReadableStream` is a web API not available in all JS
+environments, and it's heavy for simple iteration — but the objection
+will be raised.
 
 ### "Reduced proposal without MOP changes"
 
