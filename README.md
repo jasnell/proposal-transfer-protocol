@@ -1,4 +1,4 @@
-# Transferable Protocol: Symbol.transfer, Object.transfer, Reflect.transfer, and Proxy `transfer` trap
+# Transferable Protocol
 
 **Stage:** 0
 
