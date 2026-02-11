@@ -1,6 +1,6 @@
 # Transfer Protocol
 
-**Stage:** 0
+**Stage:** (pre stage 0)
 
 **Champions:** TBD
 
