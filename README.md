@@ -18,46 +18,36 @@ JavaScript: moving exclusive access from one holder to another, rendering the
 original unusable. But the concept is hardcoded to `ArrayBuffer`. This proposal
 generalizes it:
 
-1. **`Symbol.transfer`** -- a well-known symbol for opting into transfer.
-2. **`Object.transfer(obj)`** -- triggers transfer, returns new owner,
-   detaches original.
-3. **`Reflect.transfer(obj)`** -- low-level MOP primitive for use in Proxy
-   traps.
-4. **Proxy `transfer` handler trap** -- intercepts transfer on Proxy objects.
-
-These follow `Symbol.iterator` and `Symbol.dispose` as a language protocol.
+| Concept | Description |
+|-|-|
+| `Symbol.transfer` | A well-known symbol for the transfer protocol |
+| `Object.transfer(obj)` | Static method to trigger transfer |
+| `Reflect.transfer(obj)` | Reflect method for use in Proxy traps |
+| Proxy `transfer` trap | Intercept transfer on Proxy objects |
 
 ### An Existing Pattern Without a Common Protocol
 
-Multiple APIs already implement ownership transfer independently, each with
-its own method name and mechanism:
+Multiple language, web, runtime, and user-land APIs already implement ownership transfer independently, each with its own method name and mechanism:
 
-- **`ArrayBuffer.prototype.transfer()`** -- moves buffer data, detaches
-  the original (ES2024).
-- **`ReadableStream` / `WritableStream` locking** -- `getReader()` locks
-  a stream to a single consumer; `releaseLock()` releases it. Both
-  `ReadableStream` and `WritableStream` are transferable via `postMessage()`.
-- **`DisposableStack.prototype.move()`** -- moves registered resources to
-  a new stack, marks the original disposed.
-- **`postMessage()` transfer lists** -- `ArrayBuffer`, `MessagePort`,
-  `OffscreenCanvas`, `ImageBitmap`, and others can be transferred across
-  realms, detaching the source.
-- **Runtime-specific types** -- Node.js adds `FileHandle` as a transferable
-  type (detached on send) and `X509Certificate`, `KeyObject`, `CryptoKey`,
-  etc. as cloneable types (copied, not detached) in `postMessage()`, none
-  of which are covered by the web API or language spec.
+| API | Transfer Mechanism |
+|-|-|
+| `ArrayBuffer.prototype.transfer()` | moves buffer data, detached the original |
+| `ReadableStream` / `WritableStream` locking | `getReader()` locks a stream to a single consumer; `releaseLock()` releases it |
+| `DisposableStack.prototype.move()` | moves registered resources to a new stack, marks the original disposed |
+| `postMessage()` transfer lists | `ArrayBuffer`, `MessagePort`, `OffscreenCanvas`, `ImageBitmap`, and others can be transferred across realms, detaching the source |
+| Runtime-specific types | Node.js adds `FileHandle` as a transferable type (detached on send) |
 
-These all exist as at least an attempt enforce (or allow for) exclusive ownership
-of a stateful resource, but share no common protocol. There is no way to write
-generic code that transfers an arbitrary resource, and no way for user-defined
-types to participate. Proxy can intercept the underlying method calls via existing
-traps (`get`, `apply`), but cannot distinguish a transfer operation from an ordinary
-property access without inspecting the property key — a dedicated trap
-makes the intent explicit and easier for engines to optimize.
+These all exist as at least an attempt to either enforce, or allow for, exclusive
+ownership of a stateful resource, but share no common protocol. There is no way to
+write generic code that transfers an arbitrary resource, and no way for
+user-defined types to participate. Proxy can intercept the underlying method calls
+via existing traps (`get`, `apply`), but cannot distinguish a transfer operation
+from an ordinary property access without inspecting the property key — a dedicated
+trap makes the intent explicit and easier for engines to optimize.
 
 ### The Problem with Iterators
 
-Iterators are the primary motivating case. An iterator is stateful and
+Iterators are a primary motivating case. An iterator is stateful and
 single-consumer -- `.next()` advances state that cannot be rewound. Yet
 nothing prevents multiple consumers from sharing a reference and interleaving
 `.next()` calls:
@@ -81,10 +71,10 @@ async function processStream(stream) {
 }
 ```
 
-`ReadableStream.from(iter)` wraps an async
-iterator in a `ReadableStream` that has locking — but the locking protects
-the *stream*, not the *iterator*. Any code that retains a reference to
-`iter` can call `.next()` and pull values out from under the stream:
+`ReadableStream.from(iter)` wraps an async iterator in a `ReadableStream` that has
+locking — but the locking protects the *stream*, not the *iterator*. Any code that
+retains a reference to `iter` can call `.next()` and pull values out from under
+the stream:
 
 ```js
 const iter = generateData();
@@ -140,7 +130,7 @@ A new well-known symbol. An object implements the protocol by providing a
 `[Symbol.transfer]()` method that:
 
 1. Returns a new object that takes ownership of the receiver's state.
-2. Detaches the receiver permanently.
+2. Detaches the receiver permanently (see below).
 
 #### The Protocol Defines Shape, Not Behavior
 
@@ -344,6 +334,11 @@ chain delegation. There is no meaningful "receiver" distinct from the target.
 6. Perform `? ValidateTransferTrapResult(target, trapResult)`.
 7. Return `trapResult`.
 
+### No syntax changes
+
+Unlike `using` with `Symbol.dispose` and `await using` with `Symbol.asyncDispose',
+the transfer protocol does not require new syntax. `Object.transfer()` is sufficient to trigger transfer semantics, and the `transfer` trap allows Proxies to intercept without syntax changes.
+
 #### Trap Invariants
 
 The `ValidateTransferTrapResult` operation enforces:
@@ -442,17 +437,17 @@ The following built-in types would implement `[Symbol.transfer]()`.
 
 | Object type                              | Transferable? | Mechanism                          |
 |------------------------------------------|---------------|------------------------------------|
-| Array iterators (`.values()`, etc.)      | Yes           | `Iterator.prototype[@@transfer]` |
-| Map/Set iterators                        | Yes           | `Iterator.prototype[@@transfer]` |
-| Generator objects                        | Yes           | `Iterator.prototype[@@transfer]` |
-| Iterator Helpers results (`.map()`, etc.)| Yes           | `Iterator.prototype[@@transfer]` |
-| Async generator objects                  | Yes           | `AsyncIterator.prototype[@@transfer]` |
-| `DisposableStack`                        | Yes           | `[@@transfer]` delegates to `.move()` |
-| `AsyncDisposableStack`                   | Yes           | `[@@transfer]` delegates to `.move()` |
-| `ArrayBuffer`                            | Yes           | `[@@transfer]` delegates to `.transfer()` |
-| Plain `{ next() {} }` objects            | **No**        | No `[Symbol.transfer]` -- throws `TypeError` |
-| Arrays, Maps, Sets (the collections)     | **No**        | They are iterab*les*, not iterators |
-| Arbitrary user objects                   | **No**        | Unless they implement the protocol  |
+| Array iterators (`.values()`, etc.)      | Yes | `Iterator.prototype[@@transfer]` |
+| Map/Set iterators                        | Yes | `Iterator.prototype[@@transfer]` |
+| Generator objects                        | Yes | `Iterator.prototype[@@transfer]` |
+| Iterator Helpers results (`.map()`, etc.)| Yes | `Iterator.prototype[@@transfer]` |
+| Async generator objects                  | Yes | `AsyncIterator.prototype[@@transfer]` |
+| `DisposableStack`                        | Yes | `[@@transfer]` delegates to `.move()` |
+| `AsyncDisposableStack`                   | Yes | `[@@transfer]` delegates to `.move()` |
+| `ArrayBuffer`                            | Yes | `[@@transfer]` delegates to `.transfer()` |
+| Plain `{ next() {} }` objects            | No  | No `[Symbol.transfer]` -- throws `TypeError` |
+| Arrays, Maps, Sets (the collections)     | No  | They are iterab*les*, not iterators |
+| Arbitrary user objects                   | No  | Unless they implement the protocol  |
 
 Plain-object iterators with no shared prototype will not gain transfer
 automatically. Custom iterators that need it must implement
@@ -474,7 +469,9 @@ class MyIterator {
 }
 ```
 
-### Iterator.prototype[Symbol.transfer]()
+### Iterators
+
+#### Iterator.prototype[Symbol.transfer]()
 
 After transfer, the original iterator is detached:
 
@@ -487,7 +484,7 @@ owned.next();   // { value: 1, done: false }
 owned.next();   // { value: 2, done: false }
 ```
 
-#### The `[[Detached]]` Internal Slot
+##### The `[[Detached]]` Internal Slot
 
 Built-in iterators need a way to distinguish "detached" from "exhausted."
 An exhausted iterator returns `{ value: undefined, done: true }` from
@@ -509,7 +506,7 @@ The new iterator inherits all of the original's iteration-specific internal
 slots (e.g., `[[IteratedObject]]`, `[[ArrayIteratorNextIndex]]`). The
 original has those slots cleared and `[[Detached]]` set to `true`.
 
-### AsyncIterator.prototype[Symbol.transfer]()
+#### AsyncIterator.prototype[Symbol.transfer]()
 
 Same semantics for async iterators (with a `[[Detached]]` slot on async
 iterator types):
@@ -525,6 +522,68 @@ const owned = Object.transfer(iter);
 await iter.next();    // throws TypeError: AsyncIterator has been detached
 await owned.next();   // { value: 1, done: false }
 ```
+
+#### Changes to `%IteratorPrototype% [ @@dispose ]`
+
+The existing `%IteratorPrototype%[@@dispose]()` algorithm (ERM §12.1.1.1)
+calls `.return()` on the iterator. Because `.return()` throws `TypeError` on
+a detached iterator, disposal of a transferred iterator would throw --
+violating the rule that cleanup methods no-op after transfer.
+
+This proposal requires modifying the normative definition of
+`%IteratorPrototype%[@@dispose]()` to suppress errors from `.return()` when
+the iterator has been detached. The modified algorithm:
+
+1. Let _O_ be the **this** value.
+2. If _O_ has a `[[Detached]]` slot and _O_.[[Detached]] is **true**, return
+   **undefined**.
+3. Let _return_ be ? GetMethod(_O_, "return").
+4. If _return_ is not **undefined**, then
+   a. Perform ? Call(_return_, _O_).
+5. Return **undefined**.
+
+The same change applies to `%AsyncIteratorPrototype%[@@asyncDispose]()`.
+
+This ensures that `using` / `await using` bindings that hold a
+now-transferred iterator silently no-op at block exit, consistent with
+`DisposableStack` and the general post-transfer cleanup contract.
+
+#### Transfer Mid-Iteration
+
+Transfer itself always succeeds immediately -- it detaches the source and
+returns a new owner. Consequences depend on timing:
+
+**Sync iterators in a `for...of` loop.** The loop's next `.next()` call
+throws `TypeError` (detached). The loop's implicit `try/finally` then calls
+`.return()`, which also throws:
+
+```js
+const iter = [1, 2, 3].values();
+for (const x of iter) {
+  if (x === 2) {
+    const owned = Object.transfer(iter);
+    // Next iteration: iter.next() throws TypeError
+    // Loop finally: iter.return() also throws TypeError
+    doWork(owned);
+  }
+}
+```
+
+**Async iterators with pending operations.** An async generator may have
+an in-flight `.next()` whose promise has not yet settled:
+
+```js
+const iter = asyncGen();
+const pending = iter.next();  // in-flight
+Object.transfer(iter);        // what happens?
+```
+
+`[Symbol.transfer]()` should throw `TypeError` if the async generator has
+pending operations (`[[AsyncGeneratorState]]` is `"executing"` or the queue
+is non-empty). The caller must `await` pending operations before
+transferring. The alternative -- implicitly cancelling pending operations
+(à la `ReadableStreamDefaultReader.releaseLock()`) -- adds complexity
+without clear benefit.
 
 ### DisposableStack / AsyncDisposableStack
 
@@ -542,6 +601,7 @@ function setupResources() {
   return Object.transfer(stack);
   // stack is detached -- the `using` cleanup at block exit is a no-op
   // caller owns all registered resources via the returned stack
+  // Equivalent to calling stack.move() but using the generalized protocol
 }
 
 {
@@ -583,7 +643,11 @@ errors). The current proposal defers to `.move()`'s existing behavior.
 
 ### Post-Transfer Behavior
 
-The general rule: **operational methods throw, cleanup methods no-op.**
+The general rule: operational methods throw, cleanup methods no-op.
+
+Iterators are an exception in that all methods (including `.return()`) throw,
+since cleanup responsibility has transferred to the new owner and a silent no-op
+could mask ownership bugs.
 
 #### Iterators
 
@@ -624,25 +688,6 @@ have been moved, there is nothing to clean up.
 
 Accessing a detached buffer's contents throws `TypeError`.
 
-### No Built-in `detached` Property
-
-No `.detached` property is added to any built-in iterator prototype -- same
-web compatibility concern as `.transfer()`. Ownership should be clear from
-control flow. User-defined types can add their own `detached` getter.
-
-`ArrayBuffer.prototype.detached` and `DisposableStack.prototype.disposed`
-predate this proposal and are unaffected. After transfer via
-`Object.transfer()`, `buf.detached` is `true` and `stack.disposed` is
-`true` — these existing accessors already reflect the post-transfer state.
-
-### Transfer Is Not Copy, and Not Cleanup
-
-Transfer **moves** state, it does not copy. The new iterator picks up where
-the original left off; the original is permanently detached.
-
-Transfer does **not** call `.return()` or `[Symbol.dispose]()` on the
-original. The new owner assumes responsibility for cleanup.
-
 #### Interaction with Explicit Resource Management (`using`)
 
 If the original is held by `using` / `await using`, dispose **will still be
@@ -665,7 +710,10 @@ async function example(source) {
 ```
 
 The detach guard applies to **operational methods** (`.next()`, `.return()`,
-`.throw()`) -- not to disposal. Pattern for user-defined types:
+`.throw()`) -- not to disposal. For iterators, where `[Symbol.dispose]()` /
+`[Symbol.asyncDispose]()` delegates to `.return()`, the dispose
+implementation must catch the `TypeError` from a detached `.return()` and
+suppress it, preserving the no-op invariant. Pattern for user-defined types:
 
 ```js
 class MyResource {
@@ -687,42 +735,7 @@ class MyResource {
 }
 ```
 
-### Chained Transfers
-
-Transferring a detached object throws. Transferring from the current owner
-is valid:
-
-```js
-const a = [1, 2, 3].values();
-const b = Object.transfer(a);
-Object.transfer(a);  // throws TypeError: Iterator has been detached
-
-const c = Object.transfer(b);  // OK -- b is now detached, c is the owner
-```
-
 ### Edge Cases
-
-#### Transfer Mid-Iteration
-
-If `Object.transfer()` is called on an iterator during an active `for...of`
-or `for await...of` loop, the next `.next()` call by the loop machinery
-throws `TypeError` (the iterator is detached). The loop's implicit
-`try/finally` then calls `.return()` on the detached iterator, which also
-throws:
-
-```js
-const iter = [1, 2, 3].values();
-for (const x of iter) {
-  if (x === 2) {
-    const owned = Object.transfer(iter);
-    // On next iteration: iter.next() throws TypeError
-    // Loop's finally block: iter.return() also throws TypeError
-    doWork(owned);
-  }
-}
-```
-
-The transfer itself succeeds; the loop fails on the next iteration step.
 
 #### `Symbol.transfer` on `Object.prototype`
 
@@ -762,32 +775,6 @@ The `[[Transfer]]` algorithm uses `? Call()`, so the exception propagates
 to the caller. The protocol does not attempt to roll back partial state changes.
 Implementations should structure `[Symbol.transfer]()` to perform all
 fallible operations before mutating state when possible.
-
-#### Transfer of an Actively Executing Async Iterator
-
-An async generator may be in the middle of executing when transfer is
-attempted -- e.g., a `.next()` call has been made but the returned promise
-has not yet settled:
-
-```js
-const iter = asyncGen();
-const pending = iter.next();  // in-flight, generator is executing
-Object.transfer(iter);        // what happens?
-```
-
-This is an implementation decision. Two options:
-
-1. **Throw if executing.** If `[[AsyncGeneratorState]]` is `"executing"`
-   or there are pending `.next()` calls in the queue, `[Symbol.transfer]()`
-   throws `TypeError`. The caller must `await` pending operations before
-   transferring. This is the safer and simpler approach.
-2. **Cancel pending operations.** Transfer succeeds, pending `.next()`
-   promises are rejected or resolved with `{ value: undefined, done: true }`.
-    This follows `ReadableStreamDefaultReader.releaseLock()` semantics but
-    adds complexity.
-
-Option 1 is recommended. Requiring the caller to `await` before transferring
-is simpler than introducing implicit cancellation semantics.
 
 #### Re-entrancy
 
@@ -829,33 +816,6 @@ This creates an inconsistency with `ArrayBuffer`: `buf.transfer()` succeeds
 on frozen buffers (the `ArrayBufferCopyAndDetach` algorithm has no
 `IsExtensible` check), but `Object.transfer(buf)` would throw. See
 Anticipated Objections for discussion of the options.
-
-#### Iterator Helpers Chains
-
-When transferring a composed iterator pipeline, only the outermost iterator
-is detached:
-
-```js
-const iter = [1, 2, 3, 4, 5].values();
-const pipeline = iter.map(x => x * 2).filter(x => x > 4).take(2);
-
-const owned = Object.transfer(pipeline);
-// pipeline is detached
-// The intermediate map/filter iterators and `iter` are NOT detached
-```
-
-The `take` iterator's internal state includes a reference to the `filter`
-iterator, which references the `map` iterator, which references `iter`.
-Transfer moves this entire chain into the new owner -- but only the `take`
-iterator object itself is marked detached. If the caller still holds a
-reference to `iter` or an intermediate iterator, they can consume values
-from underneath the transferred chain. Transfer detaches the object you
-call it on, not the objects it references.
-
-Transfer operates on a single object, not a graph.
-`ArrayBuffer.prototype.transfer()` works the same way -- transferring a
-buffer doesn't detach a `TypedArray` that references it (though accessing
-the view will throw because the underlying data is gone).
 
 ## Use Cases
 
@@ -1036,7 +996,17 @@ b.use();  // [1, 2, 3] -- both hold a reference to the same data.
 The engine validates mechanics (callable, returns object) but not semantics
 (original rendered unusable).
 
-### Use Case 6: Proxy Membranes and Security Boundaries
+### Use Case 6: Cross-Realm Iterator Transfer
+
+With `Symbol.transfer` as a common protocol, iterators can participate in
+`postMessage()` transfer lists -- moving an iterator across worker boundaries
+using a `MessagePort` pair, the same way `ReadableStream` transfer works
+today. A sync `Iterator` becomes an `AsyncIterator` on the receiving side
+(since `MessagePort` communication is inherently asynchronous). See
+[CROSS-REALM-ITERATOR-TRANSFER.md](./CROSS-REALM-ITERATOR-TRANSFER.md) for
+the full design.
+
+### Use Case 7: Proxy Membranes and Security Boundaries
 
 Without a `transfer` trap, transfer bypasses Proxy membranes:
 
@@ -1065,89 +1035,6 @@ function createMembrane(wetTarget) {
 
   return wrap(wetTarget);
 }
-```
-
-## Design Considerations
-
-### Why `Object.transfer()` instead of a prototype method?
-
-1. **Web compatibility.** `.transfer()` on `Iterator.prototype` or
-   `Object.prototype` risks breaking existing code.
-2. **Generality.** `Object.transfer(x)` works regardless of type.
-3. **Validation.** Single place to check argument, method, return value.
-4. **Precedent.** `Object.groupBy()`, `Object.hasOwn()`,
-   `Object.fromEntries()`.
-
-### No `Object.isTransferable()` Predicate
-
-`Symbol.transfer in obj` is sufficient:
-
-```js
-if (Symbol.transfer in obj) {
-  obj = Object.transfer(obj);
-}
-```
-
-### Why `Symbol.transfer`?
-
-Follows existing convention: `Symbol.dispose`, `Symbol.iterator`,
-`Symbol.toPrimitive`, `Symbol.replace` all name the operation.
-
-### Why a `[[Transfer]]` internal method and Proxy trap?
-
-Every MOP operation (`[[Get]]`, `[[Set]]`, `[[Delete]]`, etc.) has an
-internal method, ordinary implementation, Proxy trap, and `Reflect` method.
-Without `[[Transfer]]`, Proxies cannot intercept transfer -- the `get` trap
-would fire for the symbol lookup but cannot distinguish it from a regular
-property access.
-
-### Why both `Object.transfer()` and `Reflect.transfer()`?
-
-- **`Object.transfer()`** -- application code.
-- **`Reflect.transfer()`** -- Proxy trap forwarding.
-
-Identical behavior on non-Proxy objects. They diverge only for Proxies.
-
-### Relationship to ArrayBuffer.prototype.transfer()
-
-`ArrayBuffer` would additionally implement `[Symbol.transfer]()`, delegating
-to the existing `.transfer()` method:
-
-```js
-const buf = new ArrayBuffer(1024);
-const owned = Object.transfer(buf); // works via [[Transfer]] -> @@transfer
-buf.detached; // true
-```
-
-Additive -- existing `buf.transfer()` code is unaffected.
-
-### Relationship to structuredClone / postMessage
-
-Out of scope -- these are web platform APIs. The web platform can
-independently recognize `Symbol.transfer` in transfer lists as a WHATWG/W3C
-follow-on.
-
-### Relationship to ReadableStream
-
-`ReadableStream` already has reader locking. It could implement
-`[Symbol.transfer]()` to move ownership entirely:
-
-```js
-const stream = new ReadableStream(/* ... */);
-const owned = Object.transfer(stream);
-// stream is now detached; owned is the sole consumer
-```
-
-### What about generator functions?
-
-Generators inherit from `Iterator.prototype` and gain `[Symbol.transfer]()`
-through the prototype chain:
-
-```js
-function* gen() { yield 1; yield 2; }
-const iter = gen();
-const owned = Object.transfer(iter);
-iter.next(); // TypeError
 ```
 
 ## Prior Art
