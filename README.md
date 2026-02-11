@@ -80,7 +80,7 @@ async function processStream(stream) {
 }
 ```
 
-``ReadableStream.from(iter)` wraps an async
+`ReadableStream.from(iter)` wraps an async
 iterator in a `ReadableStream` that has locking — but the locking protects
 the *stream*, not the *iterator*. Any code that retains a reference to
 `iter` can call `.next()` and pull values out from under the stream:
