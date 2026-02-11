@@ -46,11 +46,11 @@ its own method name and mechanism:
   transfer list with its own types (`X509Certificate`, `FileHandle`,
   `KeyObject`, etc.) that are not covered by the web API or language spec.
 
-These all enforce exclusive ownership of a stateful resource, but share no
-common protocol. There is no way to write generic code that transfers an
-arbitrary resource, and no way for user-defined types to participate. Proxy
-can intercept the underlying method calls via existing traps (`get`,
-`apply`), but cannot distinguish a transfer operation from an ordinary
+These all exist as at least an attempt enforce (or allow for) exclusive ownership
+of a stateful resource, but share no common protocol. There is no way to write
+generic code that transfers an arbitrary resource, and no way for user-defined
+types to participate. Proxy can intercept the underlying method calls via existing
+traps (`get`, `apply`), but cannot distinguish a transfer operation from an ordinary
 property access without inspecting the property key — a dedicated trap
 makes the intent explicit and easier for engines to optimize.
 
