@@ -11,7 +11,7 @@
 This proposal is at Stage 0 and is seeking feedback on the core concept and
 API design.
 
-## Motivation
+## Summary
 
 `ArrayBuffer.prototype.transfer()` (ES2024) introduced ownership transfer to
 JavaScript: moving exclusive access from one holder to another, rendering the
@@ -25,7 +25,11 @@ generalizes it:
 | `Reflect.transfer(obj)` | Reflect method for use in Proxy traps |
 | Proxy `transfer` trap | Intercept transfer on Proxy objects |
 
-### An Existing Pattern Without a Common Protocol
+The name "transfer" is adopted from the existing `ArrayBuffer.prototype.transfer()`.
+
+### Motivation
+
+#### An Existing Pattern Without a Common Protocol
 
 Multiple language, web, runtime, and user-land APIs already implement ownership transfer independently, each with its own method name and mechanism:
 
@@ -45,7 +49,7 @@ via existing traps (`get`, `apply`), but cannot distinguish a transfer operation
 from an ordinary property access without inspecting the property key — a dedicated
 trap makes the intent explicit and easier for engines to optimize.
 
-### The Problem with Iterators
+#### The Problem with Iterators
 
 Iterators are a primary motivating case. An iterator is stateful and
 single-consumer -- `.next()` advances state that cannot be rewound. Yet
@@ -86,31 +90,6 @@ await iter.next(); // bypasses the stream -- silently steals data
 
 The stream has no way to prevent this because iterators have no ownership
 primitive.
-
-### Not All Iterables Are Transferable
-
-The iteration protocol is duck-typed. Many iterators are plain objects with
-no shared prototype:
-
-```js
-// A perfectly valid iterator -- but has no prototype-level transfer support
-const myIter = {
-  i: 0,
-  next() { return { value: this.i++, done: this.i > 3 }; }
-};
-```
-
-**Transfer is opt-in.** Calling `Object.transfer()` on an object without
-`[Symbol.transfer]()` throws a `TypeError`:
-
-```js
-const plain = { next() { return { value: 1, done: false }; } };
-Object.transfer(plain); // throws TypeError: Object is not transferable
-```
-
-Built-in iterators (Array, Map/Set, generators, Iterator Helpers) implement
-`[Symbol.transfer]()` on their shared prototypes. User-land iterators must
-implement it explicitly.
 
 ### Why a Protocol?
 
@@ -157,14 +136,14 @@ discipline of not sharing the result is the caller's responsibility.
 
 #### Custom Implementations Must Enforce Their Own Detach Semantics
 
-**The engine does not enforce detachment for user-defined types.** `[[Transfer]]`
+The engine does not enforce detachment for user-defined types. `[[Transfer]]`
 calls `[Symbol.transfer]()` and validates the return is an object -- nothing
-more. The **implementor** must:
+more. The implementor must:
 
 - Detach the original (clear state, set a flag).
 - Throw on subsequent operational access (`.next()`, `.read()`, etc.).
 - Throw if `[Symbol.transfer]()` is called again on a detached object.
-- **Not** throw when `[Symbol.dispose]()` is called on a detached object --
+- Not throw when `[Symbol.dispose]()` is called on a detached object --
   disposal must be a no-op. See "Interaction with Explicit Resource
   Management" below.
 
@@ -216,14 +195,14 @@ class OwnedResource {
 
 ### The `[[Transfer]]` Internal Method
 
-A new essential internal method. For **ordinary objects**, `[[Transfer]]()`
+A new essential internal method. For ordinary objects, `[[Transfer]]()`
 performs:
 
-1. If `! IsExtensible(O)` is `false`, throw a **`TypeError`** ("cannot
+1. If `! IsExtensible(O)` is `false`, throw a `TypeError` ("cannot
    transfer a frozen or sealed object").
 2. Let `transferFn` be `? GetMethod(O, @@transfer)`. Returns `undefined` if
    absent; throws `TypeError` if present but not callable.
-3. If `transferFn` is `undefined`, throw a **`TypeError`** ("object is not
+3. If `transferFn` is `undefined`, throw a `TypeError` ("object is not
    transferable").
 4. Let `result` be `? Call(transferFn, O)`.
 5. If `result` is not an Object, throw a `TypeError`
@@ -247,7 +226,7 @@ Many iterators in the ecosystem are plain objects without
 `[Symbol.transfer]()`. `Object.transfer()` will correctly throw on these
 rather than silently misbehave.
 
-For **Proxy exotic objects**, `[[Transfer]]()` is intercepted by the
+For Proxy exotic objects, `[[Transfer]]()` is intercepted by the
 `transfer` handler trap (see below).
 
 ### `Object.transfer(obj)`
@@ -289,7 +268,7 @@ The `Reflect` counterpart:
 | Get         | —                      | `Reflect.get()`           | `get`         |
 | Set         | —                      | `Reflect.set()`           | `set`         |
 | Delete      | —                      | `Reflect.deleteProperty()`| `deleteProperty`|
-| **Transfer**| **`Object.transfer()`**| **`Reflect.transfer()`**  | **`transfer`**|
+| Transfer    | `Object.transfer()`    | `Reflect.transfer()`      | `transfer`    |
 
 **Steps:**
 
@@ -343,9 +322,9 @@ the transfer protocol does not require new syntax. `Object.transfer()` is suffic
 
 The `ValidateTransferTrapResult` operation enforces:
 
-1. **Must return an object.** If the trap returns a non-object, throw a
+1. Must return an object: If the trap returns a non-object, throw a
    `TypeError`.
-2. **Non-configurable transferability.** If the target has a non-configurable,
+2. Non-configurable transferability: If the target has a non-configurable,
    non-writable `[Symbol.transfer]` property that is `undefined`, the
    trap must throw (cannot fabricate transferability for a non-transferable
     target). The `has` and `get` traps have analogous invariants for
@@ -430,11 +409,6 @@ const owned = Object.transfer(virtualResource); // works
 
 ## Built-in Implementations
 
-The following built-in types would implement `[Symbol.transfer]()`.
-`Object.transfer()` throws `TypeError` on anything else.
-
-### What Is and Is Not Transferable
-
 | Object type                              | Transferable? | Mechanism                          |
 |------------------------------------------|---------------|------------------------------------|
 | Array iterators (`.values()`, etc.)      | Yes | `Iterator.prototype[@@transfer]` |
@@ -484,7 +458,7 @@ owned.next();   // { value: 1, done: false }
 owned.next();   // { value: 2, done: false }
 ```
 
-##### The `[[Detached]]` Internal Slot
+#### The `[[Detached]]` Internal Slot
 
 Built-in iterators need a way to distinguish "detached" from "exhausted."
 An exhausted iterator returns `{ value: undefined, done: true }` from
@@ -534,13 +508,13 @@ This proposal requires modifying the normative definition of
 `%IteratorPrototype%[@@dispose]()` to suppress errors from `.return()` when
 the iterator has been detached. The modified algorithm:
 
-1. Let _O_ be the **this** value.
-2. If _O_ has a `[[Detached]]` slot and _O_.[[Detached]] is **true**, return
-   **undefined**.
+1. Let _O_ be the *this* value.
+2. If _O_ has a `[[Detached]]` slot and _O_.[[Detached]] is *true*, return
+   *undefined*.
 3. Let _return_ be ? GetMethod(_O_, "return").
-4. If _return_ is not **undefined**, then
+4. If _return_ is not *undefined*, then
    a. Perform ? Call(_return_, _O_).
-5. Return **undefined**.
+5. Return *undefined*.
 
 The same change applies to `%AsyncIteratorPrototype%[@@asyncDispose]()`.
 
@@ -553,30 +527,30 @@ now-transferred iterator silently no-op at block exit, consistent with
 Transfer itself always succeeds immediately -- it detaches the source and
 returns a new owner. Consequences depend on timing:
 
-**Sync iterators in a `for...of` loop.** The loop's next `.next()` call
+- Sync iterators in a `for...of` loop: The loop's next `.next()` call
 throws `TypeError` (detached). The loop's implicit `try/finally` then calls
 `.return()`, which also throws:
 
-```js
-const iter = [1, 2, 3].values();
-for (const x of iter) {
-  if (x === 2) {
-    const owned = Object.transfer(iter);
-    // Next iteration: iter.next() throws TypeError
-    // Loop finally: iter.return() also throws TypeError
-    doWork(owned);
+  ```js
+  const iter = [1, 2, 3].values();
+  for (const x of iter) {
+    if (x === 2) {
+      const owned = Object.transfer(iter);
+      // Next iteration: iter.next() throws TypeError
+      // Loop finally: iter.return() also throws TypeError
+      doWork(owned);
+    }
   }
-}
-```
+  ```
 
-**Async iterators with pending operations.** An async generator may have
+ - Async iterators with pending operations. An async generator may have
 an in-flight `.next()` whose promise has not yet settled:
 
-```js
-const iter = asyncGen();
-const pending = iter.next();  // in-flight
-Object.transfer(iter);        // what happens?
-```
+  ```js
+  const iter = asyncGen();
+  const pending = iter.next();  // in-flight
+  Object.transfer(iter);        // what happens?
+  ```
 
 `[Symbol.transfer]()` should throw `TypeError` if the async generator has
 pending operations (`[[AsyncGeneratorState]]` is `"executing"` or the queue
@@ -584,6 +558,31 @@ is non-empty). The caller must `await` pending operations before
 transferring. The alternative -- implicitly cancelling pending operations
 (à la `ReadableStreamDefaultReader.releaseLock()`) -- adds complexity
 without clear benefit.
+
+### Not All Iterables Are Transferable
+
+The iteration protocol is duck-typed. Many iterators are plain objects with
+no shared prototype:
+
+```js
+// A perfectly valid iterator -- but has no prototype-level transfer support
+const myIter = {
+  i: 0,
+  next() { return { value: this.i++, done: this.i > 3 }; }
+};
+```
+
+Transfer is opt-in. Calling `Object.transfer()` on an object without
+`[Symbol.transfer]()` throws a `TypeError`:
+
+```js
+const plain = { next() { return { value: 1, done: false }; } };
+Object.transfer(plain); // throws TypeError: Object is not transferable
+```
+
+Built-in iterators (Array, Map/Set, generators, Iterator Helpers) implement
+`[Symbol.transfer]()` on their shared prototypes. User-land iterators must
+implement it explicitly.
 
 ### DisposableStack / AsyncDisposableStack
 
@@ -635,8 +634,8 @@ throw, cleanup no-ops) with no changes to `DisposableStack` itself.
 `AsyncDisposableStack.prototype.move()` (spec §12.4.3.6) is identical in
 structure, using `[[AsyncDisposableState]]` instead.
 
-One wrinkle: `.move()` throws **`ReferenceError`** on disposed stacks, while
-detached iterators throw **`TypeError`**. `[Symbol.transfer]()` could either
+One wrinkle: `.move()` throws `ReferenceError` on disposed stacks, while
+detached iterators throw `TypeError`. `[Symbol.transfer]()` could either
 preserve `.move()`'s error type (simple delegation) or normalize to
 `TypeError` (consistency with iterators and the protocol's own validation
 errors). The current proposal defers to `.move()`'s existing behavior.
@@ -690,8 +689,8 @@ Accessing a detached buffer's contents throws `TypeError`.
 
 #### Interaction with Explicit Resource Management (`using`)
 
-If the original is held by `using` / `await using`, dispose **will still be
-called** at block exit. A detached object **must not throw** from dispose --
+If the original is held by `using` / `await using`, dispose will still be
+called at block exit. A detached object must not throw from dispose --
 it must be a silent no-op:
 
 ```js
@@ -709,7 +708,7 @@ async function example(source) {
 }
 ```
 
-The detach guard applies to **operational methods** (`.next()`, `.return()`,
+The detach guard applies to operational methods (`.next()`, `.return()`,
 `.throw()`) -- not to disposal. For iterators, where `[Symbol.dispose]()` /
 `[Symbol.asyncDispose]()` delegates to `.return()`, the dispose
 implementation must catch the `TypeError` from a detached `.return()` and
@@ -924,7 +923,7 @@ their reference to the iterator. With transfer, the API can enforce it.
 
 ### Use Case 5: User-Defined Transferable Resources
 
-**Implementors enforce detach semantics** -- the engine does not (see above).
+Implementors enforce detach semantics -- the engine does not (see above).
 
 Correct:
 
@@ -1039,30 +1038,30 @@ function createMembrane(wetTarget) {
 
 ## Prior Art
 
-- **`ArrayBuffer.prototype.transfer()`** (ES2024) -- ownership transfer for
+- `ArrayBuffer.prototype.transfer()` (ES2024) -- ownership transfer for
   binary data buffers, with detach semantics.
-- **Web platform `Transferable` interface** -- `postMessage()` supports
+- Web platform `Transferable` interface -- `postMessage()` supports
   transferring `ArrayBuffer`, `MessagePort`, `ReadableStream`, etc. between
   contexts, detaching the original.
-- **Proxy handler traps** -- every fundamental MOP operation (`[[Get]]`,
+- Proxy handler traps -- every fundamental MOP operation (`[[Get]]`,
   `[[Set]]`, `[[Delete]]`, `[[Call]]`, etc.) has a corresponding Proxy trap
   and `Reflect` method. This proposal extends that pattern to transfer.
-- **Rust's ownership model** -- move semantics ensure single ownership of
+- Rust's ownership model -- move semantics ensure single ownership of
   resources at compile time.
-- **`ReadableStream` locking** -- prevents concurrent access to a stream
+- `ReadableStream` locking -- prevents concurrent access to a stream
   by locking it to a single reader.
-- **C++ `std::move`** -- casts to an rvalue reference, enabling move
+- C++ `std::move` -- casts to an rvalue reference, enabling move
   constructors/assignment operators to transfer resources. The source is
   left in a valid but unspecified state.
-- **`Symbol.iterator` / `Symbol.dispose`** -- precedent for Symbol-based
+- `Symbol.iterator` / `Symbol.dispose` -- precedent for Symbol-based
   protocols in the language for iteration and resource management.
-- **Piscina `Transferable` interface** -- the [Piscina][piscina] worker pool
+- Piscina `Transferable` interface -- the [Piscina][piscina] worker pool
   defines a symbol-based transfer protocol: objects implement
   `[Piscina.transferableSymbol]` (returns the transfer list) and
   `[Piscina.valueSymbol]` (returns the value to transmit) to opt into
   `postMessage` transfer. This is a userland precursor to `Symbol.transfer`,
   limited to cross-thread transfer.
-- **Comlink `transfer()` / `releaseProxy()`** -- [Comlink][comlink] wraps
+- Comlink `transfer()` / `releaseProxy()` -- [Comlink][comlink] wraps
   `postMessage` transfer with `Comlink.transfer(value, transferables)` and
   provides `proxy[Comlink.releaseProxy]()` which sets a flag and throws on
   subsequent access — a manual same-realm invalidation pattern.
@@ -1079,14 +1078,14 @@ Not part of the TC39 proposal. Discusses potential web platform integration.
 The web platform has [`Transferable`][transferable] objects via `postMessage()`
 / `structuredClone()`. `Symbol.transfer` is complementary but distinct:
 
-| Aspect                  | Web platform `Transferable`             | `Symbol.transfer`                    |
-|-------------------------|-----------------------------------------|------------------------------------------|
-| **Scope**               | Cross-realm (workers, iframes)          | Same-realm (in-process ownership move)   |
-| **Mechanism**           | Structured clone algorithm              | `[[Transfer]]` internal method           |
-| **Defined by**          | WHATWG HTML spec                        | ECMAScript (this proposal)               |
-| **What moves**          | Underlying data across thread boundary  | Logical ownership within same thread     |
-| **Objects supported**   | Hardcoded list in the spec              | Any object implementing the protocol     |
-| **User-extensible**     | No                                      | Yes                                      |
+| Aspect            | Web platform `Transferable`             | `Symbol.transfer`                    |
+|-------------------|-----------------------------------------|------------------------------------------|
+| Scope             | Cross-realm (workers, iframes)          | Same-realm (in-process ownership move)   |
+| Mechanism         | Structured clone algorithm              | `[[Transfer]]` internal method           |
+| Defined by        | WHATWG HTML spec                        | ECMAScript (this proposal)               |
+| What moves        | Underlying data across thread boundary  | Logical ownership within same thread     |
+| Objects supported | Hardcoded list in the spec              | Any object implementing the protocol     |
+| User-extensible   | No                                      | Yes                                      |
 
 `postMessage()` moves data across realms; `Object.transfer()` moves
 ownership within the same realm. Both detach the source.
@@ -1109,28 +1108,28 @@ worker.postMessage({ cursor }, { transfer: [cursor] });
 
 Already transferable via `postMessage()` or already have locking semantics:
 
-**ReadableStream** -- Has `getReader()` locking. Already `postMessage()`
+- `ReadableStream` -- Has `getReader()` locking. Already `postMessage()`
 transferable. Same-realm transfer complements locking with full ownership move.
 
-```js
-const stream = new ReadableStream(/* ... */);
-const owned = Object.transfer(stream);
-// stream is detached; owned is the sole consumer
-// No need to acquire a reader lock -- ownership is exclusive
-```
+  ```js
+  const stream = new ReadableStream(/* ... */);
+  const owned = Object.transfer(stream);
+  // stream is detached; owned is the sole consumer
+  // No need to acquire a reader lock -- ownership is exclusive
+  ```
 
-**WritableStream** -- Same locking model via `getWriter()`.
+- `WritableStream` -- Same locking model via `getWriter()`.
 
-**TransformStream** -- Readable + writable sides, both locked. Transfer
+- `TransformStream` -- Readable + writable sides, both locked. Transfer
 moves both ends atomically.
 
-**MessagePort** -- Already `postMessage()` transferable. Single-consumer.
+- `MessagePort` -- Already `postMessage()` transferable. Single-consumer.
 
-**ImageBitmap** -- Already `postMessage()` transferable. Has `.close()`.
+- `ImageBitmap` -- Already `postMessage()` transferable. Has `.close()`.
 
-**OffscreenCanvas** -- Already `postMessage()` transferable. Single context.
+- `OffscreenCanvas` -- Already `postMessage()` transferable. Single context.
 
-**VideoFrame / AudioData** (WebCodecs) -- Already `postMessage()`
+- `VideoFrame` / `AudioData` (WebCodecs) -- Already `postMessage()`
 transferable. Have `.close()` for lifetime management.
 
 #### Moderate Candidates
@@ -1138,54 +1137,54 @@ transferable. Have `.close()` for lifetime management.
 Single-consumer or exclusive-access, but not currently `postMessage()`
 transferable:
 
-**FileSystemFileHandle / FileSystemDirectoryHandle** -- Represents file/dir
+- `FileSystemFileHandle` / `FileSystemDirectoryHandle` -- Represents file/dir
 access. Transfer useful for handing off to another component.
 
-**FileSystemWritableFileStream** -- Single-writer file I/O.
+- `FileSystemWritableFileStream` -- Single-writer file I/O.
 
-**ReadableStreamDefaultReader / ReadableStreamBYOBReader** -- Represent the
+- `ReadableStreamDefaultReader` / `ReadableStreamBYOBReader` -- Represent the
 read lock on a `ReadableStream`. Transferring a reader would be equivalent to
 releasing the lock and acquiring a new one from the stream:
 
-```js
-const stream = new ReadableStream(/* ... */);
-const reader = stream.getReader();
+  ```js
+  const stream = new ReadableStream(/* ... */);
+  const reader = stream.getReader();
 
-// Transfer is equivalent to:
-//   reader.releaseLock();
-//   const newReader = stream.getReader();
-// but expressed as a single ownership move.
-const newReader = Object.transfer(reader);
+  // Transfer is equivalent to:
+  //   reader.releaseLock();
+  //   const newReader = stream.getReader();
+  // but expressed as a single ownership move.
+  const newReader = Object.transfer(reader);
 
-// reader is detached -- cannot read or release
-// newReader holds the lock
-```
+  // reader is detached -- cannot read or release
+  // newReader holds the lock
+  ```
 
-This has observable side effects: `releaseLock()` cancels any pending
-`reader.read()` calls, resolving them with `{ value: undefined, done: true }`.
-A `[Symbol.transfer]()` implementation would need the same behavior --
-transferring a reader with in-flight reads cancels them.
+  This has observable side effects: `releaseLock()` cancels any pending
+  `reader.read()` calls, resolving them with `{ value: undefined, done: true }`.
+  A `[Symbol.transfer]()` implementation would need the same behavior --
+  transferring a reader with in-flight reads cancels them.
 
-**WritableStreamDefaultWriter** -- Same locking model as the readers above,
+- `WritableStreamDefaultWriter` -- Same locking model as the readers above,
 via `WritableStream.getWriter()`. Transfer would release and reacquire the
 write lock with the same cancellation semantics for pending `writer.write()`
 and `writer.close()` calls.
 
-**IDBCursor** -- Stateful sequential-access cursor tied to a transaction.
+- `IDBCursor` -- Stateful sequential-access cursor tied to a transaction.
 
-**RTCDataChannel** -- Single `onmessage` handler, though event-based
+- `RTCDataChannel` -- Single `onmessage` handler, though event-based
 delivery is less natural for transfer than streams.
 
 #### Poor Fit
 
 Multi-consumer by design:
 
-- **AbortController / AbortSignal** -- Multiple listeners, broadcast model.
-- **EventTarget** -- Multi-consumer event dispatch.
-- **BroadcastChannel** -- Multi-consumer messaging.
-- **WebSocket** -- Event-based delivery with multiple listeners.
-- **MediaStreamTrack** -- Clonable, multiple simultaneous sinks.
-- **Request / Response** -- Body is single-use, but `.clone()` exists and
+- `AbortController` / `AbortSignal` -- Multiple listeners, broadcast model.
+- `EventTarget` -- Multi-consumer event dispatch.
+- `BroadcastChannel` -- Multi-consumer messaging.
+- `WebSocket` -- Event-based delivery with multiple listeners.
+- `MediaStreamTrack` -- Clonable, multiple simultaneous sinks.
+- `Request` / `Response` -- Body is single-use, but `.clone()` exists and
   objects are not typically transferred between owners.
 
 ### Pattern: Same-Realm vs. Cross-Realm Transfer
@@ -1209,7 +1208,7 @@ the same realm or a different one.
 
 ## Open Questions
 
-1. **`ReferenceError` vs `TypeError` on post-transfer access?**
+1. `ReferenceError` vs `TypeError` on post-transfer access?
    `DisposableStack` methods throw `ReferenceError` on disposed stacks (the
    existing spec behavior). Detached iterators would throw `TypeError` (new
    behavior). Detached `ArrayBuffer` access also throws `TypeError`. Should
@@ -1220,7 +1219,7 @@ the same realm or a different one.
    between "transferred stack throws ReferenceError" and "transferred
    iterator throws TypeError" may confuse users.
 
-2. **`Iterator.from()` as a bridge for non-transferable iterators?**
+2. `Iterator.from()` as a bridge for non-transferable iterators?
    `Iterator.from(plain)` wraps a duck-typed iterator in an object that
    inherits `[Symbol.transfer]()` from `Iterator.prototype`:
    ```js
@@ -1229,7 +1228,7 @@ the same realm or a different one.
    Object.transfer(Iterator.from(plain)); // OK -- wrapper is transferable
    ```
    Problem: transferring the wrapper detaches the wrapper but the underlying
-   plain object remains accessible. **Leaning no** -- this leaky abstraction
+   plain object remains accessible. Leaning no -- this leaky abstraction
    undermines the ownership guarantee.
 
 ## Anticipated Objections
