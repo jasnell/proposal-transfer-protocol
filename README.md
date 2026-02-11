@@ -1,4 +1,4 @@
-# Transferable Protocol
+# Transfer Protocol
 
 **Stage:** 0
 
