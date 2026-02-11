@@ -35,16 +35,17 @@ its own method name and mechanism:
 - **`ArrayBuffer.prototype.transfer()`** -- moves buffer data, detaches
   the original (ES2024).
 - **`ReadableStream` / `WritableStream` locking** -- `getReader()` locks
-  a stream to a single consumer; `releaseLock()` releases it.
-  `ReadableStream` is also transferable via `postMessage()`.
+  a stream to a single consumer; `releaseLock()` releases it. Both
+  `ReadableStream` and `WritableStream` are transferable via `postMessage()`.
 - **`DisposableStack.prototype.move()`** -- moves registered resources to
   a new stack, marks the original disposed.
 - **`postMessage()` transfer lists** -- `ArrayBuffer`, `MessagePort`,
   `OffscreenCanvas`, `ImageBitmap`, and others can be transferred across
   realms, detaching the source.
-- **Runtime-specific transferables** -- Node.js extends the `postMessage()`
-  transfer list with its own types (`X509Certificate`, `FileHandle`,
-  `KeyObject`, etc.) that are not covered by the web API or language spec.
+- **Runtime-specific types** -- Node.js adds `FileHandle` as a transferable
+  type (detached on send) and `X509Certificate`, `KeyObject`, `CryptoKey`,
+  etc. as cloneable types (copied, not detached) in `postMessage()`, none
+  of which are covered by the web API or language spec.
 
 These all exist as at least an attempt enforce (or allow for) exclusive ownership
 of a stateful resource, but share no common protocol. There is no way to write
@@ -297,7 +298,7 @@ The `Reflect` counterpart:
 |-------------|------------------------|---------------------------|---------------|
 | Get         | —                      | `Reflect.get()`           | `get`         |
 | Set         | —                      | `Reflect.set()`           | `set`         |
-| Delete      | `Object.delete…`       | `Reflect.deleteProperty()`| `deleteProperty`|
+| Delete      | —                      | `Reflect.deleteProperty()`| `deleteProperty`|
 | **Transfer**| **`Object.transfer()`**| **`Reflect.transfer()`**  | **`transfer`**|
 
 **Steps:**
@@ -555,7 +556,7 @@ function setupResources() {
 `ArrayBuffer.prototype[Symbol.transfer]()` delegates to `.transfer()`.
 No additional `[[Detached]]` slot or machinery is needed.
 
-The `.move()` algorithm (spec §12.3.3.5):
+The `.move()` algorithm (spec §12.3.3.6):
 
 1. Check `[[DisposableState]]` — if already `disposed`, throw `ReferenceError`.
 2. Create a new `DisposableStack` with `[[DisposableState]]` set to `pending`.
@@ -571,7 +572,7 @@ throw `ReferenceError`; `.dispose()` / `[Symbol.dispose]()` returns
 `undefined` (no-op). This matches the transfer contract (operational methods
 throw, cleanup no-ops) with no changes to `DisposableStack` itself.
 
-`AsyncDisposableStack.prototype.move()` (spec §12.4.3.5) is identical in
+`AsyncDisposableStack.prototype.move()` (spec §12.4.3.6) is identical in
 structure, using `[[AsyncDisposableState]]` instead.
 
 One wrinkle: `.move()` throws **`ReferenceError`** on disposed stacks, while
@@ -1163,8 +1164,9 @@ iter.next(); // TypeError
   resources at compile time.
 - **`ReadableStream` locking** -- prevents concurrent access to a stream
   by locking it to a single reader.
-- **C++ `std::move`** -- moves resources from one object to another, leaving
-  the source in a valid but unspecified state.
+- **C++ `std::move`** -- casts to an rvalue reference, enabling move
+  constructors/assignment operators to transfer resources. The source is
+  left in a valid but unspecified state.
 - **`Symbol.iterator` / `Symbol.dispose`** -- precedent for Symbol-based
   protocols in the language for iteration and resource management.
 - **Piscina `Transferable` interface** -- the [Piscina][piscina] worker pool
@@ -1385,7 +1387,7 @@ objects don't have either.
 ### "The frozen/sealed check is inconsistent with ArrayBuffer"
 
 `ArrayBuffer.prototype.transfer()` works on frozen ArrayBuffers today.
-The `ArrayBufferCopyAndDetach` algorithm (spec §25.1.3.3) checks
+The `ArrayBufferCopyAndDetach` abstract operation checks
 `RequireInternalSlot`, `IsSharedArrayBuffer`, `IsDetachedBuffer`, and
 `[[ArrayBufferDetachKey]]` — but never `IsExtensible`. `Object.freeze()`
 prevents property changes but does not prevent internal slot mutation
@@ -1468,17 +1470,16 @@ relationship.
 `ReadableStream` already has locking, single-consumer semantics, and is
 transferable via `postMessage()`. If the primary motivation is safe
 single-consumer iteration, wrapping an iterator in a `ReadableStream`
-solves it today. `ReadableStream` is a web API not available in all JS
-environments, and it's heavy for simple iteration — but the objection
-will be raised.
+solves it today. `ReadableStream` is now available in Node.js, Deno, and Bun, but may
+be absent in embedded engines — and it's heavy for simple iteration.
 
 ### "Reduced proposal without MOP changes"
 
 If the Proxy trap and `[[Transfer]]` internal method face strong resistance,
 a fallback is: `Symbol.transfer` + `Object.transfer()` only. No Proxy trap,
-no `Reflect.transfer()`, no MOP changes. `Object.transfer()` calls the
-symbol via `[[Get]]` + `[[Call]]` with validation. This loses Proxy
+no `Reflect.transfer()`, no new internal method. In this reduced version,
+`Object.transfer()` would look up and call the symbol via ordinary
+`[[Get]]` + `[[Call]]` (with return-value validation), rather than routing
+through a dedicated `[[Transfer]]` internal method. This loses Proxy
 interceptability but covers the primary use cases (iterators, user-defined
-resources, `ArrayBuffer` unification) with far less spec complexity. This
-could serve as a negotiating position if the full proposal is seen as too
-heavyweight.
+resources, `ArrayBuffer` unification) with far less spec complexity.

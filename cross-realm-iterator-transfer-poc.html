@@ -1,0 +1,1005 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cross-Realm Iterator Transfer - Proof of Concept</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: monospace; padding: 24px; background: #1a1a2e; color: #e0e0e0; }
+  h1 { font-size: 18px; margin-bottom: 4px; color: #7ec8e3; }
+  h2 { font-size: 14px; margin-bottom: 16px; color: #888; font-weight: normal; }
+  .test { margin-bottom: 24px; border: 1px solid #333; border-radius: 6px; overflow: hidden; }
+  .test-header {
+    padding: 10px 14px; background: #16213e; font-weight: bold; font-size: 13px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .test-header .status { font-size: 11px; padding: 2px 8px; border-radius: 3px; }
+  .status.running { background: #e2a03f; color: #000; }
+  .status.pass { background: #2ecc71; color: #000; }
+  .status.fail { background: #e74c3c; color: #fff; }
+  .test-body { padding: 10px 14px; font-size: 12px; line-height: 1.6; }
+  .test-body .log { color: #aaa; }
+  .test-body .result { color: #7ec8e3; }
+  .test-body .error { color: #e74c3c; }
+  .test-body .detach { color: #e2a03f; }
+  .test-body .info { color: #666; font-style: italic; }
+</style>
+</head>
+<body>
+
+<h1>Cross-Realm Iterator Transfer via MessagePort</h1>
+<h2>Proof of concept implementing the algorithm from CROSS-REALM-ITERATOR-TRANSFER.md</h2>
+
+<div id="tests"></div>
+
+<script>
+// ================================================================
+// Shared helper: PackAndPostMessage
+//
+// Creates a null-prototype message object to avoid interference from
+// Object.prototype, then posts it on the given port.
+// ================================================================
+
+function packAndPostMessage(port, type, value) {
+  const message = Object.create(null);
+  message.type = type;
+  message.value = value;
+  port.postMessage(message);
+}
+
+function packAndPostMessageHandlingError(port, type, value) {
+  try {
+    packAndPostMessage(port, type, value);
+  } catch (e) {
+    // Already errored -- discard further errors (crossRealmTransformSendError)
+    try { packAndPostMessage(port, 'error', String(e)); } catch {}
+  }
+}
+
+// ================================================================
+// ResolveIteratorForTransfer(value)
+//
+// Determines the iterator to transfer. Supports proper instances,
+// duck-typed iterators, and bare iterables.
+// @@asyncIterator takes precedence over @@iterator.
+// ================================================================
+
+function resolveIteratorForTransfer(value) {
+  if (value == null) throw new TypeError('Cannot transfer null/undefined');
+
+  // Step 1-2: Proper AsyncIterator / Iterator instance checks.
+  // In userland we can't check internal slots, so we use the prototype chain.
+  // A proper async iterator typically has Symbol.asyncIterator returning itself
+  // AND inherits from AsyncIterator.prototype (or similar). For the PoC, we
+  // rely on the @@asyncIterator / @@iterator / duck-type detection chain.
+
+  // Step 3-4: Check @@asyncIterator
+  const asyncIteratorMethod = value[Symbol.asyncIterator];
+  if (typeof asyncIteratorMethod === 'function') {
+    const iterator = asyncIteratorMethod.call(value);
+    if (iterator == null || typeof iterator.next !== 'function') {
+      throw new TypeError('[Symbol.asyncIterator]() did not return a valid iterator');
+    }
+    return { iterator, isAsync: true };
+  }
+
+  // Step 5-6: Check @@iterator
+  const iteratorMethod = value[Symbol.iterator];
+  if (typeof iteratorMethod === 'function') {
+    const iterator = iteratorMethod.call(value);
+    if (iterator == null || typeof iterator.next !== 'function') {
+      throw new TypeError('[Symbol.iterator]() did not return a valid iterator');
+    }
+    return { iterator, isAsync: false };
+  }
+
+  // Step 7: Duck-typed iterator (has callable next)
+  if (typeof value.next === 'function') {
+    // Treated as async -- await on non-Promise is a no-op
+    return { iterator: value, isAsync: true };
+  }
+
+  // Step 8
+  throw new TypeError('Value is not an iterator or iterable');
+}
+
+// ================================================================
+// SetUpCrossRealmTransformIteratorSource(iterator, port)
+//
+// Sending side for a SYNC iterator. Listens for request messages,
+// calls the corresponding method on the real iterator synchronously,
+// posts the result back.
+// ================================================================
+
+function setUpCrossRealmTransformIteratorSource(iterator, port) {
+  port.onmessage = (event) => {
+    const data = event.data;
+    const type = data.type;
+    const value = data.value;
+
+    if (type === 'next') {
+      let result;
+      try {
+        result = value === undefined ? iterator.next() : iterator.next(value);
+      } catch (e) {
+        packAndPostMessage(port, 'error', cloneableError(e));
+        port.close(); // disentangle
+        return;
+      }
+      const done = !!result.done;
+      const responseObject = Object.create(null);
+      responseObject.value = result.value;
+      responseObject.done = done;
+      packAndPostMessageHandlingError(port, 'result', responseObject);
+      if (done) {
+        // Source-side return() for resource cleanup (fire-and-forget)
+        if (typeof iterator.return === 'function') {
+          try { iterator.return(); } catch {}
+        }
+        port.close(); // disentangle
+      }
+
+    } else if (type === 'return') {
+      if (typeof iterator.return !== 'function') {
+        const responseObject = Object.create(null);
+        responseObject.value = value;
+        responseObject.done = true;
+        packAndPostMessage(port, 'result', responseObject);
+      } else {
+        try {
+          const result = iterator.return(value);
+          const responseObject = Object.create(null);
+          responseObject.value = result.value;
+          responseObject.done = !!result.done;
+          packAndPostMessage(port, 'result', responseObject);
+        } catch (e) {
+          packAndPostMessage(port, 'error', cloneableError(e));
+        }
+      }
+      port.close(); // disentangle (always, for return)
+
+    } else if (type === 'throw') {
+      if (typeof iterator.throw !== 'function') {
+        packAndPostMessage(port, 'error', cloneableError(value));
+        port.close(); // disentangle
+        return;
+      }
+      let result;
+      try {
+        result = iterator.throw(value);
+      } catch (e) {
+        packAndPostMessage(port, 'error', cloneableError(e));
+        port.close(); // disentangle
+        return;
+      }
+      const done = !!result.done;
+      const responseObject = Object.create(null);
+      responseObject.value = result.value;
+      responseObject.done = done;
+      packAndPostMessageHandlingError(port, 'result', responseObject);
+      if (done) {
+        if (typeof iterator.return === 'function') {
+          try { iterator.return(); } catch {}
+        }
+        port.close(); // disentangle
+      }
+    }
+  };
+
+  port.onmessageerror = () => {
+    if (typeof iterator.return === 'function') {
+      try { iterator.return(); } catch {}
+    }
+    port.close();
+  };
+
+  port.start();
+}
+
+// ================================================================
+// SetUpCrossRealmTransformAsyncIteratorSource(iterator, port)
+//
+// Sending side for an ASYNC (or duck-typed) iterator. Same structure
+// as the sync version, but awaits results from the iterator before
+// posting responses.
+// ================================================================
+
+function setUpCrossRealmTransformAsyncIteratorSource(iterator, port) {
+  let chain = Promise.resolve();
+  let iterDone = false;
+
+  async function processRequest(type, value) {
+    if (iterDone) return;
+
+    if (type === 'next') {
+      try {
+        const result = await (value === undefined ? iterator.next() : iterator.next(value));
+        const done = !!result.done;
+        const responseObject = Object.create(null);
+        responseObject.value = result.value;
+        responseObject.done = done;
+        packAndPostMessageHandlingError(port, 'result', responseObject);
+        if (done) {
+          if (typeof iterator.return === 'function') {
+            try { await iterator.return(); } catch {}
+          }
+          iterDone = true;
+          port.close();
+        }
+      } catch (e) {
+        packAndPostMessage(port, 'error', cloneableError(e));
+        iterDone = true;
+        port.close();
+      }
+
+    } else if (type === 'return') {
+      if (typeof iterator.return !== 'function') {
+        const responseObject = Object.create(null);
+        responseObject.value = value;
+        responseObject.done = true;
+        packAndPostMessage(port, 'result', responseObject);
+      } else {
+        try {
+          const result = await iterator.return(value);
+          const responseObject = Object.create(null);
+          responseObject.value = result.value;
+          responseObject.done = !!result.done;
+          packAndPostMessage(port, 'result', responseObject);
+        } catch (e) {
+          packAndPostMessage(port, 'error', cloneableError(e));
+        }
+      }
+      iterDone = true;
+      port.close();
+
+    } else if (type === 'throw') {
+      if (typeof iterator.throw !== 'function') {
+        packAndPostMessage(port, 'error', cloneableError(value));
+        iterDone = true;
+        port.close();
+        return;
+      }
+      try {
+        const result = await iterator.throw(value);
+        const done = !!result.done;
+        const responseObject = Object.create(null);
+        responseObject.value = result.value;
+        responseObject.done = done;
+        packAndPostMessageHandlingError(port, 'result', responseObject);
+        if (done) {
+          if (typeof iterator.return === 'function') {
+            try { await iterator.return(); } catch {}
+          }
+          iterDone = true;
+          port.close();
+        }
+      } catch (e) {
+        packAndPostMessage(port, 'error', cloneableError(e));
+        iterDone = true;
+        port.close();
+      }
+    }
+  }
+
+  port.onmessage = (event) => {
+    const data = event.data;
+    const type = data.type;
+    const value = data.value;
+    chain = chain.then(() => processRequest(type, value));
+  };
+
+  port.onmessageerror = () => {
+    if (typeof iterator.return === 'function') {
+      try { iterator.return(); } catch {}
+    }
+    iterDone = true;
+    port.close();
+  };
+
+  port.start();
+}
+
+// ================================================================
+// Helper: make errors structured-cloneable
+// ================================================================
+
+function cloneableError(e) {
+  if (e instanceof Error) return { name: e.name, message: e.message, stack: e.stack };
+  if (typeof e === 'string') return e;
+  try { return String(e); } catch { return 'Unknown error'; }
+}
+
+// ================================================================
+// transferIterator(value) -> MessagePort
+//
+// The main-thread "transfer steps": resolves the iterator, creates
+// a MessageChannel, sets up the source handler, returns the port
+// to be transferred to another realm.
+// ================================================================
+
+function transferIterator(value) {
+  const { iterator, isAsync } = resolveIteratorForTransfer(value);
+
+  const channel = new MessageChannel();
+
+  if (isAsync) {
+    setUpCrossRealmTransformAsyncIteratorSource(iterator, channel.port1);
+  } else {
+    setUpCrossRealmTransformIteratorSource(iterator, channel.port1);
+  }
+
+  return channel.port2;
+}
+
+
+// ================================================================
+// Worker code (receiving side)
+//
+// Contains SetUpCrossRealmTransformAsyncIteratorConsumer and a
+// test runner that receives ports and iterates them.
+// ================================================================
+
+const workerCode = `
+'use strict';
+
+// ----------------------------------------------------------------
+// Shared helper (duplicated in worker since it's a separate realm)
+// ----------------------------------------------------------------
+
+function packAndPostMessage(port, type, value) {
+  const message = Object.create(null);
+  message.type = type;
+  message.value = value;
+  port.postMessage(message);
+}
+
+// ----------------------------------------------------------------
+// SetUpCrossRealmTransformAsyncIteratorConsumer(port)
+//
+// Receiving side. Creates an AsyncIterator whose next/return/throw
+// methods send requests over the port and return promises that
+// resolve when the source responds.
+// ----------------------------------------------------------------
+
+function setUpCrossRealmTransformAsyncIteratorConsumer(port) {
+  const pendingQueue = []; // { resolve, reject } entries
+  let finished = false;
+
+  function drainQueue() {
+    for (const entry of pendingQueue) {
+      entry.resolve({ value: undefined, done: true });
+    }
+    pendingQueue.length = 0;
+    port.close();
+  }
+
+  port.onmessage = (event) => {
+    const data = event.data;
+    const type = data.type;
+    const responseValue = data.value;
+
+    if (pendingQueue.length === 0) return; // defensive
+
+    const entry = pendingQueue.shift();
+
+    if (type === 'result') {
+      const done = !!responseValue.done;
+      entry.resolve(responseValue);
+      if (done) {
+        finished = true;
+        drainQueue();
+      }
+    } else if (type === 'error') {
+      entry.reject(responseValue);
+      finished = true;
+      drainQueue();
+    }
+  };
+
+  port.onmessageerror = () => {
+    finished = true;
+    const error = new DOMException('Could not deserialize message', 'DataCloneError');
+    if (pendingQueue.length > 0) {
+      const entry = pendingQueue.shift();
+      entry.reject(error);
+    }
+    drainQueue();
+  };
+
+  port.start();
+
+  // The AsyncIterator proxy
+
+  const asyncIterator = {
+    next(arg) {
+      if (finished) {
+        return Promise.resolve({ value: undefined, done: true });
+      }
+      return new Promise((resolve, reject) => {
+        pendingQueue.push({ resolve, reject });
+        packAndPostMessage(port, 'next', arg);
+      });
+    },
+
+    return(arg) {
+      if (finished) {
+        return Promise.resolve({ value: arg, done: true });
+      }
+      finished = true;
+      return new Promise((resolve, reject) => {
+        pendingQueue.push({ resolve, reject });
+        packAndPostMessage(port, 'return', arg);
+      });
+    },
+
+    throw(arg) {
+      if (finished) {
+        return Promise.reject(arg);
+      }
+      return new Promise((resolve, reject) => {
+        pendingQueue.push({ resolve, reject });
+        packAndPostMessage(port, 'throw', arg);
+      });
+    },
+
+    [Symbol.asyncIterator]() {
+      return this;
+    }
+  };
+
+  return asyncIterator;
+}
+
+// ----------------------------------------------------------------
+// Worker message handler: receives test requests from main thread
+// ----------------------------------------------------------------
+
+self.onmessage = async (event) => {
+  const { testId, port, instructions } = event.data;
+  const log = (msg) => self.postMessage({ testId, type: 'log', message: msg });
+  const result = (msg) => self.postMessage({ testId, type: 'result', message: msg });
+  const error = (msg) => self.postMessage({ testId, type: 'error', message: msg });
+  const done = (ok) => self.postMessage({ testId, type: 'done', success: ok });
+
+  try {
+    log('Worker received port, creating AsyncIterator consumer...');
+    const iter = setUpCrossRealmTransformAsyncIteratorConsumer(port);
+
+    if (instructions === 'iterate-all') {
+      // Simple: consume all values with for-await-of
+      const values = [];
+      for await (const value of iter) {
+        values.push(value);
+        result('  next() -> { value: ' + JSON.stringify(value) + ', done: false }');
+      }
+      result('  next() -> { value: undefined, done: true }');
+      result('Collected ' + values.length + ' values: ' + JSON.stringify(values));
+      done(true);
+
+    } else if (instructions === 'iterate-with-values') {
+      // Generator protocol: pass values into next()
+      let r = await iter.next();
+      result('  next()        -> ' + JSON.stringify(r));
+
+      r = await iter.next('hello');
+      result('  next("hello") -> ' + JSON.stringify(r));
+
+      r = await iter.next('world');
+      result('  next("world") -> ' + JSON.stringify(r));
+
+      r = await iter.next('stop');
+      result('  next("stop")  -> ' + JSON.stringify(r));
+
+      // Should be finished now
+      r = await iter.next();
+      result('  next() (post-done) -> ' + JSON.stringify(r));
+      done(true);
+
+    } else if (instructions === 'iterate-with-break') {
+      // Consume part, then break (triggers return)
+      let count = 0;
+      for await (const value of iter) {
+        result('  next() -> { value: ' + JSON.stringify(value) + ', done: false }');
+        count++;
+        if (count >= 3) {
+          result('  (breaking out of loop -- triggers return())');
+          break;
+        }
+      }
+      // After break, the iterator should be finished
+      const r = await iter.next();
+      result('  next() (post-break) -> ' + JSON.stringify(r));
+      done(true);
+
+    } else if (instructions === 'iterate-with-throw') {
+      // Consume some, then throw into the iterator
+      let r = await iter.next();
+      result('  next() -> ' + JSON.stringify(r));
+
+      r = await iter.next();
+      result('  next() -> ' + JSON.stringify(r));
+
+      try {
+        r = await iter.throw('injected error');
+        result('  throw("injected error") -> ' + JSON.stringify(r));
+      } catch (e) {
+        result('  throw("injected error") rejected: ' + JSON.stringify(e));
+      }
+
+      // Iterator should be finished after throw
+      r = await iter.next();
+      result('  next() (post-throw) -> ' + JSON.stringify(r));
+      done(true);
+
+    } else if (instructions === 'concurrent-calls') {
+      // Test that concurrent next() calls are queued and resolve in order
+      const p1 = iter.next();
+      const p2 = iter.next();
+      const p3 = iter.next();
+      result('  Dispatched 3 concurrent next() calls');
+
+      const r1 = await p1;
+      result('  p1 resolved: ' + JSON.stringify(r1));
+      const r2 = await p2;
+      result('  p2 resolved: ' + JSON.stringify(r2));
+      const r3 = await p3;
+      result('  p3 resolved: ' + JSON.stringify(r3));
+
+      // All 3 values should have been received in order
+      const ok = r1.value === 100 && r2.value === 200 && r3.value === 300
+        && !r1.done && !r2.done && !r3.done;
+      if (!ok) {
+        error('  Values not received in order');
+        done(false);
+        return;
+      }
+
+      // Next call should return done (iterator exhausted)
+      const r4 = await iter.next();
+      result('  p4 (post-exhaust) resolved: ' + JSON.stringify(r4));
+      done(r4.done === true);
+
+    } else if (instructions === 'concurrent-with-exhaust') {
+      // Test that queued calls past exhaustion drain with done: true
+      const p1 = iter.next();
+      const p2 = iter.next();
+      const p3 = iter.next();
+      const p4 = iter.next(); // iterator only has 3 values; this should get done:true via drain
+      const p5 = iter.next(); // also drained
+      result('  Dispatched 5 concurrent next() calls (iter has 3 values)');
+
+      const results = await Promise.all([p1, p2, p3, p4, p5]);
+      for (let i = 0; i < results.length; i++) {
+        result('  p' + (i+1) + ' resolved: ' + JSON.stringify(results[i]));
+      }
+
+      // First 3 should have values, 4th should be the done:true from source,
+      // 5th should be drained with done:true
+      const ok = results[0].value === 100 && results[1].value === 200
+        && results[2].value === 300
+        && results[3].done === true && results[4].done === true;
+      done(ok);
+
+    } else if (instructions === 'concurrent-with-error') {
+      // Test that queued calls after a source error are drained correctly.
+      // The source yields 1 value, then throws on the 2nd next().
+      // We dispatch 4 concurrent next() calls:
+      //   p1 -> resolves with value
+      //   p2 -> rejects with the error
+      //   p3, p4 -> drained with { done: true }
+      const p1 = iter.next();
+      const p2 = iter.next();
+      const p3 = iter.next();
+      const p4 = iter.next();
+      result('  Dispatched 4 concurrent next() calls (source errors on 2nd)');
+
+      const r1 = await p1;
+      result('  p1 resolved: ' + JSON.stringify(r1));
+
+      let p2Rejected = false;
+      let p2Error;
+      try {
+        await p2;
+      } catch (e) {
+        p2Rejected = true;
+        p2Error = e;
+        result('  p2 rejected: ' + JSON.stringify(e));
+      }
+
+      const r3 = await p3;
+      result('  p3 resolved: ' + JSON.stringify(r3));
+      const r4 = await p4;
+      result('  p4 resolved: ' + JSON.stringify(r4));
+
+      const errMsg = p2Error && (p2Error.message || p2Error);
+      const ok = r1.value === 'ok' && !r1.done
+        && p2Rejected && errMsg === 'boom'
+        && r3.done === true && r4.done === true;
+      done(ok);
+
+    } else if (instructions === 'concurrent-with-async-error') {
+      // Same as above but with an async iterator that rejects a promise.
+      const p1 = iter.next();
+      const p2 = iter.next();
+      const p3 = iter.next();
+      result('  Dispatched 3 concurrent next() calls (async source rejects on 2nd)');
+
+      const r1 = await p1;
+      result('  p1 resolved: ' + JSON.stringify(r1));
+
+      let p2Rejected = false;
+      let p2Error;
+      try {
+        await p2;
+      } catch (e) {
+        p2Rejected = true;
+        p2Error = e;
+        result('  p2 rejected: ' + JSON.stringify(e));
+      }
+
+      const r3 = await p3;
+      result('  p3 resolved: ' + JSON.stringify(r3));
+
+      const ok = r1.value === 'before' && !r1.done
+        && p2Rejected
+        && r3.done === true;
+      done(ok);
+    }
+
+  } catch (e) {
+    error('Unhandled: ' + (e.message || e));
+    done(false);
+  }
+};
+`;
+
+const workerBlob = new Blob([workerCode], { type: 'application/javascript' });
+const workerUrl = URL.createObjectURL(workerBlob);
+const worker = new Worker(workerUrl);
+
+
+// ================================================================
+// Test harness
+// ================================================================
+
+const testsContainer = document.getElementById('tests');
+let testCounter = 0;
+const pendingTests = new Map();
+
+worker.onmessage = (event) => {
+  const { testId, type, message, success } = event.data;
+  const entry = pendingTests.get(testId);
+  if (!entry) return;
+
+  if (type === 'log') {
+    appendLine(entry.body, message, 'log');
+  } else if (type === 'result') {
+    appendLine(entry.body, message, 'result');
+  } else if (type === 'error') {
+    appendLine(entry.body, message, 'error');
+  } else if (type === 'done') {
+    entry.status.textContent = success ? 'PASS' : 'FAIL';
+    entry.status.className = 'status ' + (success ? 'pass' : 'fail');
+    entry.resolve(success);
+  }
+};
+
+function appendLine(container, text, className) {
+  const div = document.createElement('div');
+  div.className = className;
+  div.textContent = text;
+  container.appendChild(div);
+}
+
+function runTest(name, description, createValue, instructions) {
+  const testId = 'test-' + (++testCounter);
+
+  // Create UI
+  const testEl = document.createElement('div');
+  testEl.className = 'test';
+
+  const header = document.createElement('div');
+  header.className = 'test-header';
+
+  const titleSpan = document.createElement('span');
+  titleSpan.textContent = name;
+
+  const statusSpan = document.createElement('span');
+  statusSpan.className = 'status running';
+  statusSpan.textContent = 'RUNNING';
+
+  header.appendChild(titleSpan);
+  header.appendChild(statusSpan);
+
+  const body = document.createElement('div');
+  body.className = 'test-body';
+
+  const infoDiv = document.createElement('div');
+  infoDiv.className = 'info';
+  infoDiv.textContent = description;
+  body.appendChild(infoDiv);
+
+  testEl.appendChild(header);
+  testEl.appendChild(body);
+  testsContainer.appendChild(testEl);
+
+  return new Promise((resolve) => {
+    pendingTests.set(testId, { body, status: statusSpan, resolve });
+
+    // Main thread: create the value and transfer it
+    try {
+      const value = createValue();
+      appendLine(body, 'Main thread: created source, initiating transfer...', 'log');
+
+      const port = transferIterator(value);
+      appendLine(body, 'Main thread: source handler set up on port1, transferring port2 to worker', 'log');
+
+      // Simulate [[Detached]] -- show that the original is "conceptually detached"
+      // (We can't actually set internal slots, but we can demonstrate the concept)
+      if (value && typeof value.next === 'function') {
+        appendLine(body,
+          'Main thread: original iterator still exists in this realm, but is now owned by the port handler',
+          'detach');
+      }
+
+      // Transfer port2 to the worker
+      worker.postMessage({ testId, port, instructions }, [port]);
+      appendLine(body, 'Main thread: port2 transferred to worker', 'log');
+
+    } catch (e) {
+      appendLine(body, 'Main thread error: ' + e.message, 'error');
+      statusSpan.textContent = 'FAIL';
+      statusSpan.className = 'status fail';
+      resolve(false);
+    }
+  });
+}
+
+
+// ================================================================
+// Run all tests
+// ================================================================
+
+(async function runAllTests() {
+
+  // --------------------------------------------------
+  // Test 1: Sync Array Iterator
+  // --------------------------------------------------
+  await runTest(
+    'Test 1: Sync Array Iterator',
+    '[1, 2, 3, 4, 5].values() -> transferred as sync, received as AsyncIterator',
+    () => [1, 2, 3, 4, 5].values(),
+    'iterate-all'
+  );
+
+  // --------------------------------------------------
+  // Test 2: Sync Generator with next(value)
+  // --------------------------------------------------
+  await runTest(
+    'Test 2: Generator Protocol (bidirectional values)',
+    'Generator that yields based on values passed to next(). Tests the full generator protocol across realms.',
+    () => {
+      function* stateMachine() {
+        let input = yield 'ready';
+        while (input !== 'stop') {
+          input = yield `processed: ${input}`;
+        }
+        return 'done';
+      }
+      return stateMachine();
+    },
+    'iterate-with-values'
+  );
+
+  // --------------------------------------------------
+  // Test 3: Async Generator
+  // --------------------------------------------------
+  await runTest(
+    'Test 3: Async Generator',
+    'async function* with simulated delays. Tests async source handler.',
+    () => {
+      async function* asyncGen() {
+        for (let i = 10; i <= 50; i += 10) {
+          await new Promise(r => setTimeout(r, 50)); // simulate async work
+          yield i;
+        }
+      }
+      return asyncGen();
+    },
+    'iterate-all'
+  );
+
+  // --------------------------------------------------
+  // Test 4: Duck-Typed Iterator
+  // --------------------------------------------------
+  await runTest(
+    'Test 4: Duck-Typed Iterator',
+    'Plain object with next() method, no Symbol.iterator. Detected by ResolveIteratorForTransfer step 7.',
+    () => ({
+      _i: 0,
+      next() {
+        if (this._i >= 4) return { value: undefined, done: true };
+        return { value: `duck-${this._i++}`, done: false };
+      }
+    }),
+    'iterate-all'
+  );
+
+  // --------------------------------------------------
+  // Test 5: Duck-Typed Iterator (Promise-returning next)
+  // --------------------------------------------------
+  await runTest(
+    'Test 5: Duck-Typed Iterator (Promise-returning next)',
+    'Plain object whose next() returns a Promise. The async source handler awaits it transparently.',
+    () => ({
+      _i: 0,
+      next() {
+        const i = this._i++;
+        if (i >= 3) return Promise.resolve({ value: undefined, done: true });
+        return Promise.resolve({ value: `promise-${i}`, done: false });
+      }
+    }),
+    'iterate-all'
+  );
+
+  // --------------------------------------------------
+  // Test 6: Bare Iterable (Symbol.iterator)
+  // --------------------------------------------------
+  await runTest(
+    'Test 6: Bare Iterable (Symbol.iterator)',
+    'Object with [Symbol.iterator]() factory. ResolveIteratorForTransfer invokes the factory (step 5-6).',
+    () => ({
+      [Symbol.iterator]() {
+        let i = 0;
+        return {
+          next() {
+            if (i >= 3) return { value: undefined, done: true };
+            return { value: `iterable-${i++}`, done: false };
+          }
+        };
+      }
+    }),
+    'iterate-all'
+  );
+
+  // --------------------------------------------------
+  // Test 7: Bare Async Iterable (Symbol.asyncIterator)
+  // --------------------------------------------------
+  await runTest(
+    'Test 7: Bare Async Iterable (Symbol.asyncIterator)',
+    'Object with [Symbol.asyncIterator]() factory. Takes precedence over Symbol.iterator (step 3-4).',
+    () => ({
+      [Symbol.asyncIterator]() {
+        let i = 0;
+        return {
+          async next() {
+            await new Promise(r => setTimeout(r, 30));
+            if (i >= 3) return { value: undefined, done: true };
+            return { value: `async-iterable-${i++}`, done: false };
+          }
+        };
+      },
+      // This should be ignored -- @@asyncIterator takes precedence
+      [Symbol.iterator]() {
+        throw new Error('Should not be called');
+      }
+    }),
+    'iterate-all'
+  );
+
+  // --------------------------------------------------
+  // Test 8: Early Break (triggers return())
+  // --------------------------------------------------
+  await runTest(
+    'Test 8: Early Break (return() via for-await break)',
+    'Consumes 3 values then breaks. The break triggers return() on the transferred iterator.',
+    () => {
+      function* gen() {
+        try {
+          for (let i = 1; i <= 100; i++) yield i;
+        } finally {
+          // This runs when return() is called
+        }
+      }
+      return gen();
+    },
+    'iterate-with-break'
+  );
+
+  // --------------------------------------------------
+  // Test 9: throw() into a Generator
+  // --------------------------------------------------
+  await runTest(
+    'Test 9: throw() into Generator',
+    'Calls next() twice, then throw(). Generator does not catch, so the error propagates.',
+    () => {
+      function* gen() {
+        yield 'a';
+        yield 'b';
+        yield 'c'; // will not be reached
+      }
+      return gen();
+    },
+    'iterate-with-throw'
+  );
+
+  // --------------------------------------------------
+  // Test 10: Concurrent next() Queued
+  // --------------------------------------------------
+  await runTest(
+    'Test 10: Concurrent next() calls are queued',
+    'Calls next() 3 times without awaiting. All 3 should resolve in order with the correct values.',
+    () => [100, 200, 300].values(),
+    'concurrent-calls'
+  );
+
+  // --------------------------------------------------
+  // Test 11: Map Iterator
+  // --------------------------------------------------
+  await runTest(
+    'Test 11: Map Iterator',
+    'new Map([...]).entries() -- built-in Map iterator transferred across realms.',
+    () => new Map([['a', 1], ['b', 2], ['c', 3]]).entries(),
+    'iterate-all'
+  );
+
+  // --------------------------------------------------
+  // Test 12: Set Iterator
+  // --------------------------------------------------
+  await runTest(
+    'Test 12: Set Iterator',
+    'new Set([...]).values() -- built-in Set iterator transferred across realms.',
+    () => new Set(['x', 'y', 'z']).values(),
+    'iterate-all'
+  );
+
+  // --------------------------------------------------
+  // Test 13: Concurrent next() with Drain
+  // --------------------------------------------------
+  await runTest(
+    'Test 13: Concurrent next() drains on exhaust',
+    'Dispatches 5 concurrent next() on an iterator with 3 values. Excess calls get { done: true } via drain.',
+    () => [100, 200, 300].values(),
+    'concurrent-with-exhaust'
+  );
+
+  // --------------------------------------------------
+  // Test 14: Concurrent next() with Sync Error
+  // --------------------------------------------------
+  await runTest(
+    'Test 14: Concurrent next() with sync source error',
+    'Source yields 1 value then throws. 4 concurrent calls: p1 resolves, p2 rejects, p3-p4 drain with done.',
+    () => {
+      let count = 0;
+      return {
+        next() {
+          if (count++ === 0) return { value: 'ok', done: false };
+          throw new Error('boom');
+        },
+        [Symbol.iterator]() { return this; }
+      };
+    },
+    'concurrent-with-error'
+  );
+
+  // --------------------------------------------------
+  // Test 15: Concurrent next() with Async Error
+  // --------------------------------------------------
+  await runTest(
+    'Test 15: Concurrent next() with async source error',
+    'Async generator yields 1 value then rejects. 3 concurrent calls: p1 resolves, p2 rejects, p3 drains.',
+    () => {
+      async function* gen() {
+        yield 'before';
+        throw new Error('async boom');
+      }
+      return gen();
+    },
+    'concurrent-with-async-error'
+  );
+
+})();
+</script>
+
+</body>
+</html>
