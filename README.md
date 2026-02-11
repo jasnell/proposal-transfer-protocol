@@ -49,6 +49,10 @@ via existing traps (`get`, `apply`), but cannot distinguish a transfer operation
 from an ordinary property access without inspecting the property key — a dedicated
 trap makes the intent explicit and easier for engines to optimize.
 
+We already have two separate instances of objects with move/transfer semantics in
+the language (`ArrayBuffer` and `DisposableStack`/`AsyncDisposableStack`), each
+of which handle transfer in slightly different ways with different methods names.
+
 #### The Problem with Iterators
 
 Iterators are a primary motivating case. An iterator is stateful and
