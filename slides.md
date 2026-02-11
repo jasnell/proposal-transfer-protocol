@@ -1,8 +1,8 @@
 ---
 theme: default
-title: "Transferable Protocol"
+title: "Transfer Protocol"
 info: |
-  ## TC39 Proposal: Transferable Protocol
+  ## TC39 Proposal: Transfer Protocol
   A generalized ownership-transfer protocol for JavaScript.
 
   Stage 0
@@ -13,7 +13,7 @@ transition: slide-left
 mdc: true
 ---
 
-# Transferable Protocol
+# Transfer Protocol
 
 A generalized ownership-transfer protocol for JavaScript
 
@@ -40,10 +40,10 @@ Ownership transfer exists in the platform -- but there's no common protocol
 <v-clicks>
 
 - **`ArrayBuffer.prototype.transfer()`** -- moves buffer data, detaches the original (ES2024)
-- **`ReadableStream` / `WritableStream` locking** -- `getReader()` locks a stream to a single consumer
 - **`DisposableStack.prototype.move()`** -- moves resources to a new stack, marks original disposed
+- **`ReadableStream` / `WritableStream` locking** -- `getReader()` locks a stream to a single consumer
 - **`postMessage()` transfer lists** -- `ArrayBuffer`, `MessagePort`, `OffscreenCanvas`, etc.
-- **Node.js transferables** -- `X509Certificate`, `FileHandle`, `KeyObject`, etc.
+- **Runtime-specific types** -- Node.js adds `FileHandle` as a transferable type (detached on send)
 
 </v-clicks>
 
@@ -181,7 +181,7 @@ The low-level MOP counterpart for Proxy trap forwarding
 |-------------|-------------------------|----------------------------|------------------|
 | Get         | --                      | `Reflect.get()`            | `get`            |
 | Set         | --                      | `Reflect.set()`            | `set`            |
-| Delete      | `Object.delete...`      | `Reflect.deleteProperty()` | `deleteProperty` |
+| Delete      | --                      | `Reflect.deleteProperty()` | `deleteProperty` |
 | **Transfer** | **`Object.transfer()`** | **`Reflect.transfer()`**   | **`transfer`**   |
 
 <v-click>
@@ -284,16 +284,12 @@ What gets `[Symbol.transfer]()` out of the box
 
 | Object type | Transferable? | Mechanism |
 |-------------|:---:|-----------|
-| Array iterators (`.values()`, etc.) | Yes | `Iterator.prototype[@@transfer]` |
-| Map/Set iterators | Yes | `Iterator.prototype[@@transfer]` |
-| Generator objects | Yes | `Iterator.prototype[@@transfer]` |
-| Iterator Helper results (`.map()`, etc.) | Yes | `Iterator.prototype[@@transfer]` |
+| Array, Map/Set, Generator, Iterator Helper iterators | Yes | `Iterator.prototype[@@transfer]` |
 | Async generators | Yes | `AsyncIterator.prototype[@@transfer]` |
-| `DisposableStack` | Yes | Delegates to `.move()` |
-| `AsyncDisposableStack` | Yes | Delegates to `.move()` |
+| `DisposableStack` / `AsyncDisposableStack` | Yes | Delegates to `.move()` |
 | `ArrayBuffer` | Yes | Delegates to `.transfer()` |
 | Plain `{ next() {} }` objects | **No** | No `[Symbol.transfer]` |
-| Arrays, Maps, Sets | **No** | Iterab*les*, not iterators |
+| Arrays, Maps, Sets (the collections) | **No** | Iterab*les*, not iterators |
 
 ---
 transition: slide-left
@@ -333,124 +329,18 @@ await owned.next();   // { value: 1, done: false }
 transition: slide-left
 ---
 
-# Post-Transfer Behavior
-
-Operational methods throw, cleanup methods no-op
-
-<div class="grid grid-cols-2 gap-6">
-<div>
-
-**Iterators:**
-
-All methods throw `TypeError`:
-- `.next()`
-- `.return()`
-- `.throw()`
-- `[Symbol.iterator]()`
-- `[Symbol.asyncIterator]()`
-
-<div class="mt-2 text-sm" style="color: #6c757d;">
-  <code>[Symbol.iterator]()</code> must throw too -- otherwise <code>for...of</code> would silently enter the loop before failing on <code>.next()</code>.
-</div>
-
-</div>
-<div>
-
-**DisposableStack:**
-
-| Method | After transfer |
-|--------|---------------|
-| `.use()` | Throws `ReferenceError` |
-| `.adopt()` | Throws `ReferenceError` |
-| `.defer()` | Throws `ReferenceError` |
-| `.move()` | Throws `ReferenceError` |
-| `[Symbol.dispose]()` | No-op |
-| `.disposed` | `true` |
-
-<div class="mt-2 text-sm" style="color: #6c757d;">
-  These are the <em>existing</em> behaviors -- no spec changes needed.
-</div>
-
-</div>
-</div>
-
----
-transition: slide-left
----
-
-# Design Principle: Shape, Not Behavior
-
-The protocol defines *when* the method is called -- not *what* it does
+# Design Principles
 
 <v-clicks>
 
-- Follows the `Symbol.dispose` model: spec doesn't enforce that `[Symbol.dispose]()` actually releases resources
-- `[Symbol.transfer]()` isn't required to actually detach the source or move state
-- The engine validates **mechanics** (callable, returns object) but not **semantics** (original rendered unusable)
-- Detaching the source, throwing on post-transfer access -- these are contracts implementations are **expected** to follow
+- **Shape, not behavior** -- spec defines *when* the method is called, not *what* it does. Engine validates mechanics (callable, returns object) not semantics (source detached).
+- **Enables but does not enforce exclusive ownership** -- source is rendered unusable, but caller can still share the result. Not sharing is the caller's responsibility.
+- **Operational methods throw, cleanup methods no-op** -- `.next()`, `.read()`, etc. throw `TypeError` after transfer. `[Symbol.dispose]()` must silently no-op for safe `using` interaction.
+- **Opt-in, not universal** -- only objects implementing `[Symbol.transfer]()` are transferable. Without the symbol, `Object.transfer()` throws `TypeError`.
+- **Full MOP integration** -- `[[Transfer]]` internal method, `Object.transfer()`, `Reflect.transfer()`, Proxy `transfer` trap. Every fundamental operation has this triad.
+- **Frozen/sealed objects are non-transferable** -- transfer mutates observable behavior, contradicting `Object.freeze()`. Enforced by `[[Transfer]]`; direct `obj[Symbol.transfer]()` bypasses this.
 
 </v-clicks>
-
-<div v-click class="mt-6 p-3 rounded" style="background: #cce5ff; color: #004085;">
-  Transfer does not <em>ensure</em> exclusive access. It makes it <em>easier</em> to implement single-ownership patterns. The discipline of not sharing the result is the caller's responsibility.
-</div>
-
----
-transition: slide-left
----
-
-# Transfer Is Not Copy, and Not Cleanup
-
-Three distinct operations
-
-<div class="grid grid-cols-3 gap-4 mt-4">
-<div class="p-4 rounded" style="background: #e2e3f1; color: #1a1a2e;">
-
-**Transfer (move)**
-
-State moves to new owner. Source is detached.
-
-```js
-const b = Object.transfer(a);
-// a is dead, b has the state
-```
-
-</div>
-<div class="p-4 rounded" style="background: #e2e3f1; color: #1a1a2e;">
-
-**Clone (copy)**
-
-State is duplicated. Both remain valid.
-
-```js
-const b = structuredClone(a);
-// both a and b are alive
-```
-
-</div>
-<div class="p-4 rounded" style="background: #e2e3f1; color: #1a1a2e;">
-
-**Dispose (cleanup)**
-
-Resources are released. Object is done.
-
-```js
-a[Symbol.dispose]();
-// a has cleaned up
-```
-
-</div>
-</div>
-
-<v-click>
-
-<div class="mt-6 p-3 rounded" style="background: #fff3cd; color: #856404;">
-
-**Key:** Transfer does <strong>not</strong> call `.return()` or `[Symbol.dispose]()` on the original. The new owner assumes responsibility for cleanup.
-
-</div>
-
-</v-click>
 
 ---
 transition: slide-left
@@ -567,32 +457,6 @@ class DataProcessor {
 transition: slide-left
 ---
 
-# Use Case: DisposableStack Handoff
-
-Transfer decouples a stack from a `using` binding without triggering disposal
-
-```js
-function setupResources() {
-  using stack = new DisposableStack();
-  stack.use(openFile('a.txt'));
-  stack.use(openFile('b.txt'));
-  doValidation(); // if this throws, stack disposes both files
-  return Object.transfer(stack);
-  // stack is detached -- the `using` cleanup at block exit is a no-op
-  // caller owns all registered resources via the returned stack
-}
-
-{
-  using owned = setupResources();
-  // ... use resources ...
-  // owned[Symbol.dispose]() disposes both files at block exit
-}
-```
-
----
-transition: slide-left
----
-
 # Use Case: User-Defined Transferable Resources
 
 Any class can participate in the protocol
@@ -623,137 +487,13 @@ function processCursor(cursor) {
 ```
 
 ---
-transition: slide-left
----
-
-# Edge Cases
-
-Things to be aware of
-
-<v-clicks>
-
-- **Transfer mid-iteration** -- next `.next()` call throws, loop's `finally` calls `.return()` which also throws
-- **Frozen/sealed objects** -- `Object.transfer()` rejects them (`IsExtensible` check). Direct `[Symbol.transfer]()` bypasses this.
-- **Iterator helper chains** -- only the outermost iterator is detached; inner iterators remain accessible if references are held
-- **Chained transfers** -- transferring a detached object throws; transferring the current owner is valid
-- **Async generators mid-execution** -- recommended: throw if `[[AsyncGeneratorState]]` is `"executing"` or pending `.next()` calls exist
-- **`Symbol.transfer` on `Object.prototype`** -- exotic rejection prevents prototype pollution (follows `proposal-thenable-curtailment` model)
-
-</v-clicks>
-
----
-transition: slide-left
----
-
-# Design Decisions
-
-Why these choices?
-
-| Decision | Rationale |
-|----------|-----------|
-| `Object.transfer()` not prototype method | Web compat -- `.transfer()` on `Iterator.prototype` risks breakage |
-| `Symbol.transfer` not a string key | Follows `Symbol.dispose`, `Symbol.iterator` convention |
-| No `Object.isTransferable()` | `Symbol.transfer in obj` is sufficient |
-| Proxy trap + `Reflect` method | Every MOP op has this triad; transfer should too |
-| `[[Transfer]]` as essential internal method | Same status as `[[Call]]`/`[[Construct]]` -- most objects don't have them either |
-| No built-in `.detached` on iterators | Web compat concern; `ArrayBuffer.detached` and `DisposableStack.disposed` predate this |
-
----
-transition: slide-left
----
-
-# Relationship to Existing APIs
-
-Additive, not replacement
-
-<div class="grid grid-cols-2 gap-6 mt-2">
-<div>
-
-**`ArrayBuffer.prototype.transfer()`**
-
-`[Symbol.transfer]()` delegates to existing `.transfer()`. Existing code is unaffected.
-
-```js
-const buf = new ArrayBuffer(1024);
-const owned = Object.transfer(buf);
-buf.detached; // true
-```
-
-</div>
-<div>
-
-**`structuredClone` / `postMessage`**
-
-Out of scope for TC39. Web platform can independently recognize `Symbol.transfer` in transfer lists as a WHATWG/W3C follow-on.
-
-| | Web `Transferable` | `Symbol.transfer` |
-|-|---|---|
-| Scope | Cross-realm | Same-realm |
-| Extensible | No | Yes |
-
-</div>
-</div>
-
-<div v-click class="mt-4 text-sm" style="color: #6c757d;">
-
-**Ecosystem prior art:** [Piscina](https://github.com/piscinajs/piscina) already defines a symbol-based transfer protocol (`[Piscina.transferableSymbol]` / `[Piscina.valueSymbol]`) for opting user-defined objects into `postMessage` transfer. [Comlink](https://github.com/GoogleChromeLabs/comlink) provides `Comlink.transfer()` and a `releaseProxy()` invalidation pattern.
-
-</div>
-
----
-transition: slide-left
----
-
-# Anticipated Objections
-
-<v-clicks>
-
-- **"Too much machinery"** -- 5 new surface areas (symbol, internal method, 2 static methods, Proxy trap). Counter: MOP integration distinguishes this from a userland convention.
-
-- **"Why not userland?"** -- Userland can't: add `[Symbol.transfer]` to built-in prototypes, add a Proxy trap, or add `[[Detached]]` slots to built-in iterators.
-
-- **"Proxy trap is premature"** -- Fallback position: `Symbol.transfer` + `Object.transfer()` only. Smaller, but loses membranes.
-
-- **"Frozen/sealed inconsistency"** -- `buf.transfer()` works on frozen buffers; `Object.transfer(buf)` would throw. Three options under consideration.
-
-- **"Doesn't actually solve safety"** -- Transfer eliminates one reference but doesn't prevent sharing the result. Ecosystem benefit is incremental.
-
-- **"Just use ReadableStream"** -- Heavy for simple iteration, not available in all JS environments.
-
-</v-clicks>
-
----
-transition: slide-left
----
-
-# Open Questions
-
-<div class="mt-4">
-
-### 1. `ReferenceError` vs `TypeError` on post-transfer access?
-
-`DisposableStack` throws `ReferenceError` (existing behavior). Iterators would throw `TypeError`. Should `[Symbol.transfer]()` normalize to `TypeError` for consistency, or preserve `.move()`'s existing error?
-
-### 2. `Iterator.from()` as a bridge for non-transferable iterators?
-
-```js
-const plain = { i: 0, next() { return { value: this.i++, done: this.i > 3 }; } };
-Object.transfer(plain);                // TypeError: not transferable
-Object.transfer(Iterator.from(plain)); // OK -- wrapper is transferable
-```
-
-**Leaning no** -- transferring the wrapper detaches it, but the underlying plain object remains accessible. Leaky abstraction undermines the ownership guarantee.
-
-</div>
-
----
 layout: center
 class: text-center
 ---
 
 # Thank You
 
-Transferable Protocol -- Stage 0
+Transfer Protocol -- Stage 0
 
 <div class="mt-6">
 
