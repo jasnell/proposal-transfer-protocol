@@ -8,8 +8,8 @@
 
 ## Status
 
-This proposal is at Stage 0 and is seeking feedback on the core concept and
-API design.
+There's no current status on this proposal... I'm considering proposing it at
+TC-39 but still evaluating the motivation and concepts.
 
 ## Summary
 
