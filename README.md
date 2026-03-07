@@ -417,6 +417,8 @@ const owned = Object.transfer(virtualResource); // works
 |------------------------------------------|---------------|------------------------------------|
 | Array iterators (`.values()`, etc.)      | Yes | `Iterator.prototype[@@transfer]` |
 | Map/Set iterators                        | Yes | `Iterator.prototype[@@transfer]` |
+| String iterators                         | Yes | `Iterator.prototype[@@transfer]` |
+| RegExp String iterators                  | Yes | `Iterator.prototype[@@transfer]` |
 | Generator objects                        | Yes | `Iterator.prototype[@@transfer]` |
 | Iterator Helpers results (`.map()`, etc.)| Yes | `Iterator.prototype[@@transfer]` |
 | Async generator objects                  | Yes | `AsyncIterator.prototype[@@transfer]` |

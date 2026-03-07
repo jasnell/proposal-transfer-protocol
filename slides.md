@@ -24,7 +24,7 @@ A generalized ownership-transfer protocol for JavaScript
 </div>
 
 <div class="abs-br m-6 flex gap-2">
-  <a href="https://github.com/nicolo-ribaudo/proposal-transfer-protocol" target="_blank" class="text-xl slidev-icon-btn">
+  <a href="https://github.com/jasnell/proposal-transfer-protocol" target="_blank" class="text-xl slidev-icon-btn">
     <carbon-logo-github />
   </a>
 </div>
@@ -278,18 +278,47 @@ For **ordinary objects**:
 transition: slide-left
 ---
 
-# Built-in Transferables
+# Built-in Transferables: Iterators
 
-What gets `[Symbol.transfer]()` out of the box
+All built-in iterator types are transferable out of the box
 
-| Object type | Transferable? | Mechanism |
-|-------------|:---:|-----------|
-| Array, Map/Set, Generator, Iterator Helper iterators | Yes | `Iterator.prototype[@@transfer]` |
-| Async generators | Yes | `AsyncIterator.prototype[@@transfer]` |
-| `DisposableStack` / `AsyncDisposableStack` | Yes | Delegates to `.move()` |
-| `ArrayBuffer` | Yes | Delegates to `.transfer()` |
-| Plain `{ next() {} }` objects | **No** | No `[Symbol.transfer]` |
-| Arrays, Maps, Sets (the collections) | **No** | Iterab*les*, not iterators |
+<v-clicks>
+
+- **Array** iterators -- `.values()`, `.keys()`, `.entries()`
+- **Map / Set** iterators -- `.values()`, `.keys()`, `.entries()`
+- **String** iterators -- `"str"[Symbol.iterator]()`
+- **RegExp String** iterators -- `.matchAll()`
+- **Generator** and **async generator** instances
+- **Iterator Helpers** -- `.map()`, `.filter()`, `.take()`, etc.
+- **`Iterator.from()`** wrappers
+
+</v-clicks>
+
+<div v-click class="mt-4 p-3 rounded" style="background: #d4edda; color: #155724;">
+  Sync iterators use <code>Iterator.prototype[@@transfer]</code>; async iterators use <code>%AsyncIteratorPrototype%[@@transfer]</code>.
+</div>
+
+---
+transition: slide-left
+---
+
+# Built-in Transferables: Other Types
+
+Non-iterator types that implement `[Symbol.transfer]()`
+
+| Object type | Mechanism |
+|-------------|-----------|
+| `ArrayBuffer` | Delegates to `ArrayBufferCopyAndDetach` |
+| `DisposableStack` / `AsyncDisposableStack` | Delegates to `.move()` |
+
+<v-click>
+
+**Not transferable** (no `[Symbol.transfer]`):
+
+- Plain `{ next() {} }` iterator objects -- must implement `[Symbol.transfer]()` explicitly
+- Arrays, Maps, Sets -- these are iterab*les*, not iterators
+
+</v-click>
 
 ---
 transition: slide-left
@@ -339,6 +368,7 @@ transition: slide-left
 - **Opt-in, not universal** -- only objects implementing `[Symbol.transfer]()` are transferable. Without the symbol, `Object.transfer()` throws `TypeError`.
 - **Full MOP integration** -- `[[Transfer]]` internal method, `Object.transfer()`, `Reflect.transfer()`, Proxy `transfer` trap. Every fundamental operation has this triad.
 - **Frozen/sealed objects are non-transferable** -- transfer mutates observable behavior, contradicting `Object.freeze()`. Enforced by `[[Transfer]]`; direct `obj[Symbol.transfer]()` bypasses this.
+- **`Object.prototype` rejects `Symbol.transfer`** -- prevents `Object.prototype[Symbol.transfer] = fn` from making *every* object transferable. Follows the thenable curtailment model.
 
 </v-clicks>
 
